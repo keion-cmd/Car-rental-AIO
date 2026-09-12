@@ -37,6 +37,21 @@ const MODELS: Array<{
   { category: "Luxury", make: "Toyota", model: "Camry", seats: 5, transmission: "AUTOMATIC", fuelType: "HYBRID" },
 ];
 
+// Daily rates in centavos (PHP minor units), spread across categories.
+const DAILY_RATE_BY_CATEGORY: Record<string, number> = {
+  Economy: 180000, // PHP 1,800
+  SUV: 320000, // PHP 3,200
+  Van: 280000, // PHP 2,800
+  Luxury: 450000, // PHP 4,500
+};
+
+const SECURITY_DEPOSIT_BY_CATEGORY: Record<string, number> = {
+  Economy: 500000, // PHP 5,000
+  SUV: 900000, // PHP 9,000
+  Van: 800000, // PHP 8,000
+  Luxury: 1500000, // PHP 15,000
+};
+
 function fakePlate(index: number) {
   const letters = String.fromCharCode(65 + (index % 26)) + String.fromCharCode(65 + ((index + 3) % 26)) + String.fromCharCode(65 + ((index + 7) % 26));
   const digits = String(1000 + index).slice(-4);
@@ -44,13 +59,20 @@ function fakePlate(index: number) {
 }
 
 async function main() {
+  const settingsData = {
+    currency: "PHP",
+    defaultTurnaroundMinutes: 90,
+    taxRateBps: 1200,
+    youngDriverMaxAge: 24,
+    youngDriverSurchargePerDay: 40000,
+    billingGraceMinutes: 59,
+  };
   await prisma.settings.upsert({
     where: { id: "00000000-0000-0000-0000-000000000001" },
-    update: {},
+    update: settingsData,
     create: {
       id: "00000000-0000-0000-0000-000000000001",
-      currency: "PHP",
-      defaultTurnaroundMinutes: 90,
+      ...settingsData,
     },
   });
 
@@ -73,15 +95,25 @@ async function main() {
   for (const from of locations) {
     for (const to of locations) {
       if (from.id === to.id) continue;
+      // Deterministic one-way fee: airport legs cost more than branch-to-branch.
+      // Fees are in centavos (PHP minor units).
+      const isAirportLeg = from.isAirport || to.isAirport;
+      const feeAmount = isAirportLeg ? 50000 : 30000;
+      // Lapu-Lapu Branch -> Cebu Airport is deliberately disallowed so the
+      // rejection path is testable.
+      const isAllowed = !(from.name === "Lapu-Lapu Branch" && to.name === "Cebu Airport");
+      const pairData = {
+        isAllowed,
+        feeAmount,
+        minTransferHours: 2,
+      };
       await prisma.locationPair.upsert({
         where: { fromLocationId_toLocationId: { fromLocationId: from.id, toLocationId: to.id } },
-        update: {},
+        update: pairData,
         create: {
           fromLocationId: from.id,
           toLocationId: to.id,
-          isAllowed: true,
-          feeAmount: 0,
-          minTransferHours: 2,
+          ...pairData,
         },
       });
     }
@@ -118,17 +150,34 @@ async function main() {
 
   const homeLocation = locations[0];
   for (let i = 0; i < 12; i++) {
-    const model = models[i % models.length];
+    const modelIndex = i % models.length;
+    const model = models[modelIndex];
+    const categoryName = MODELS[modelIndex].category;
     const plateNumber = fakePlate(i);
+    const dailyRate = DAILY_RATE_BY_CATEGORY[categoryName];
+    const weeklyRate = dailyRate * 6;
+    const monthlyRate = dailyRate * 22;
+    const securityDeposit = SECURITY_DEPOSIT_BY_CATEGORY[categoryName];
+    const vehicleData = {
+      dailyRate,
+      weeklyRate,
+      monthlyRate,
+      securityDeposit,
+      includedKmPerDay: 200,
+      extraKmRate: 1500, // PHP 15/km
+      minRentalDays: 1,
+      minDriverAge: 21,
+    };
     await prisma.vehicle.upsert({
       where: { plateNumber },
-      update: {},
+      update: vehicleData,
       create: {
         modelId: model.id,
         plateNumber,
         homeLocationId: homeLocation.id,
         currentLocationId: homeLocation.id,
         isBookableOnline: true,
+        ...vehicleData,
       },
     });
   }

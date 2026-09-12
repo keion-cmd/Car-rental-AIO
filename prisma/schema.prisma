@@ -80,12 +80,34 @@ enum UserRole {
   STAFF
 }
 
+enum LineItemType {
+  BASE_RATE
+  SURCHARGE
+  FEE
+  TAX
+  DISCOUNT
+  ADDON
+  PROTECTION
+  EXTRA_CHARGE
+}
+
 // ==================== TABLES ====================
 
 model Settings {
   id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   currency               String   @default("PHP")
+  // Operational time consumed by availability between two bookings on the
+  // same vehicle (cleaning, inspection, repositioning). Distinct from
+  // billingGraceMinutes below — do not conflate the two.
   defaultTurnaroundMinutes Int    @default(90) @map("default_turnaround_minutes")
+  taxRateBps                 Int    @default(1200) @map("tax_rate_bps")
+  youngDriverMaxAge           Int    @default(24) @map("young_driver_max_age")
+  youngDriverSurchargePerDay  BigInt @default(0) @map("young_driver_surcharge_per_day")
+  // How long past a 24-hour rental-day boundary a return may occur before
+  // another full day is billed. Distinct from defaultTurnaroundMinutes
+  // above, which is operational time consumed by availability — conflating
+  // the two would corrupt availability. Inherits Settings.currency.
+  billingGraceMinutes         Int    @default(59) @map("billing_grace_minutes")
   createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -180,6 +202,25 @@ model Vehicle {
   currentLocationId  String   @map("current_location_id") @db.Uuid
   isBookableOnline   Boolean  @default(true) @map("is_bookable_online")
   archivedAt         DateTime? @map("archived_at") @db.Timestamptz
+  // Rates live on the vehicle, not the model: the product sells a specific
+  // car, and two identical units at different branches may price
+  // differently. Money columns inherit Settings.currency — this is a
+  // single-currency system and a per-vehicle sibling would be redundant.
+  // Defaulted to 0 (not literal-spec-required-only) so existing non-pricing
+  // code paths (e.g. availability tests) that create a Vehicle without
+  // pricing data keep working ahead of the pricing engine phase.
+  dailyRate          BigInt   @default(0) @map("daily_rate")
+  // weeklyRate/monthlyRate are PER-PERIOD totals (a whole week, a whole
+  // month), not a per-day rate multiplied out. The pricing engine is
+  // responsible for the conversion — do not read these as daily rates.
+  weeklyRate         BigInt?  @map("weekly_rate")
+  monthlyRate        BigInt?  @map("monthly_rate")
+  securityDeposit    BigInt   @default(0) @map("security_deposit")
+  includedKmPerDay   Int?     @map("included_km_per_day")
+  extraKmRate        BigInt?  @map("extra_km_rate")
+  minRentalDays      Int      @default(1) @map("min_rental_days")
+  maxRentalDays      Int?     @map("max_rental_days")
+  minDriverAge       Int      @default(21) @map("min_driver_age")
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -229,16 +270,42 @@ model Quote {
   dropoffLocationId  String      @map("dropoff_location_id") @db.Uuid
   pickupAt           DateTime    @map("pickup_at") @db.Timestamptz
   returnAt           DateTime    @map("return_at") @db.Timestamptz
+  // subtotalAmount/taxAmount/securityDeposit inherit currency from the
+  // currency column below — a sibling per field would be redundant.
+  subtotalAmount     BigInt      @default(0) @map("subtotal_amount")
+  taxAmount          BigInt      @default(0) @map("tax_amount")
+  securityDeposit    BigInt      @default(0) @map("security_deposit")
+  rentalDays         Int         @default(1) @map("rental_days")
   totalAmount        BigInt      @map("total_amount")
   currency           String      @default("PHP")
   status             QuoteStatus @default(DRAFT)
   createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz
 
-  customer Customer @relation(fields: [customerId], references: [id])
-  vehicle  Vehicle  @relation(fields: [vehicleId], references: [id])
+  customer  Customer        @relation(fields: [customerId], references: [id])
+  vehicle   Vehicle         @relation(fields: [vehicleId], references: [id])
+  lineItems QuoteLineItem[]
 
   @@map("quotes")
+}
+
+model QuoteLineItem {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quoteId     String       @map("quote_id") @db.Uuid
+  type        LineItemType
+  description String
+  quantity    Int          @default(1)
+  // unitAmount/totalAmount inherit currency from the parent Quote.currency
+  // — a sibling here would be redundant.
+  unitAmount  BigInt       @map("unit_amount")
+  totalAmount BigInt       @map("total_amount")
+  isTaxable   Boolean      @default(true) @map("is_taxable")
+  sortOrder   Int          @default(0) @map("sort_order")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@map("quote_line_items")
 }
 
 model Booking {
@@ -249,6 +316,12 @@ model Booking {
   dropoffLocationId  String        @map("dropoff_location_id") @db.Uuid
   pickupAt           DateTime      @map("pickup_at") @db.Timestamptz
   returnAt           DateTime      @map("return_at") @db.Timestamptz
+  // subtotalAmount/taxAmount/securityDeposit inherit currency from the
+  // currency column below — a sibling per field would be redundant.
+  subtotalAmount     BigInt        @default(0) @map("subtotal_amount")
+  taxAmount          BigInt        @default(0) @map("tax_amount")
+  securityDeposit    BigInt        @default(0) @map("security_deposit")
+  rentalDays         Int           @default(1) @map("rental_days")
   totalAmount        BigInt        @map("total_amount")
   currency           String        @default("PHP")
   status             BookingStatus @default(PENDING)
@@ -265,12 +338,19 @@ model Booking {
 }
 
 model BookingLineItem {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  bookingId   String   @map("booking_id") @db.Uuid
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId   String       @map("booking_id") @db.Uuid
+  type        LineItemType
   description String
-  amount      BigInt
-  currency    String   @default("PHP")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  quantity    Int          @default(1)
+  // unitAmount/totalAmount inherit currency from the currency column below
+  // — a sibling here would be redundant.
+  unitAmount  BigInt       @map("unit_amount")
+  totalAmount BigInt       @map("total_amount")
+  isTaxable   Boolean      @default(true) @map("is_taxable")
+  sortOrder   Int          @default(0) @map("sort_order")
+  currency    String       @default("PHP")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz
 
   booking Booking @relation(fields: [bookingId], references: [id])
 
