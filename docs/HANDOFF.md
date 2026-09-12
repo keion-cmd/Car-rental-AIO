@@ -87,6 +87,16 @@ Do not, without explicit sign-off:
   decorative.
 - `app/page.tsx` is one monolithic file. Extraction is deferred, not forgotten.
 
+## P3-P2 process lessons
+
+- Migration workflow that actually works here: `prisma migrate dev` refuses non-interactive
+  mode, so generate SQL with `prisma migrate diff --script`, write it into a new migration
+  directory by hand, then apply with `prisma migrate deploy`.
+- A phase is not complete until `git status` is clean. P2-P3 reported complete with five
+  uncommitted paths (schema, two services, a test file, a migration directory), and P3-P1
+  committed on top of that uncommitted work.
+- The local Postgres runs on port `54329`, not `5432`.
+
 ## Vercel
 
 The Vercel project is connected to this repo and will trigger a deployment on every push
