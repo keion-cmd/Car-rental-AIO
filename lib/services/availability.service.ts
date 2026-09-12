@@ -76,15 +76,48 @@ export async function isVehicleAvailable(
   const buffers = await resolveBuffersForLocation(db, vehicle.currentLocationId);
   const { start, end } = expandWindow(pickupAt, returnAt, buffers);
 
+  // A HOLD block whose quote has expired must not be able to permanently
+  // hide a vehicle from availability — this holds regardless of whether
+  // releaseExpiredHolds() has run yet.
   const rows = await db.$queryRaw<Array<{ blocked: boolean }>>`
     SELECT EXISTS (
-      SELECT 1 FROM vehicle_blocks
-      WHERE vehicle_id = ${vehicleId}::uuid
-      AND period && tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
+      SELECT 1 FROM vehicle_blocks vb
+      WHERE vb.vehicle_id = ${vehicleId}::uuid
+      AND vb.period && tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
+      AND NOT (
+        vb.block_type = 'HOLD'::"BlockType"
+        AND EXISTS (SELECT 1 FROM quotes q WHERE q.id = vb.quote_id AND q.expires_at < now())
+      )
     ) AS blocked
   `;
 
   return !rows[0]?.blocked;
+}
+
+// Card-rendering data (make/model/seats/transmission/fuel/category/image)
+// plus every field the pricing engine needs (see QuoteVehicleInput in
+// lib/pricing/quote.ts), so a caller pricing a search result never has to
+// re-fetch the vehicle or duplicate this select elsewhere.
+export interface AvailableVehicle {
+  id: string;
+  plateNumber: string;
+  dailyRate: bigint;
+  weeklyRate: bigint | null;
+  monthlyRate: bigint | null;
+  securityDeposit: bigint;
+  minRentalDays: number;
+  maxRentalDays: number | null;
+  minDriverAge: number;
+  model: {
+    id: string;
+    make: string;
+    model: string;
+    seats: number;
+    transmission: "MANUAL" | "AUTOMATIC";
+    fuelType: "PETROL" | "DIESEL" | "HYBRID" | "ELECTRIC";
+    category: { id: string; name: string };
+  };
+  images: Array<{ url: string }>;
 }
 
 export async function findAvailableVehicles(
@@ -93,7 +126,7 @@ export async function findAvailableVehicles(
   returnAt: Date,
   filters?: AvailabilityFilters,
   tx?: DbClient
-): Promise<Array<{ id: string; plateNumber: string; dailyRate: bigint }>> {
+): Promise<AvailableVehicle[]> {
   const db = tx ?? prisma;
 
   const buffers = await resolveBuffersForLocation(db, pickupLocationId);
@@ -112,7 +145,29 @@ export async function findAvailableVehicles(
       isBookableOnline: true,
       ...(Object.keys(modelWhere).length > 0 ? { model: modelWhere } : {}),
     },
-    select: { id: true, plateNumber: true, dailyRate: true },
+    select: {
+      id: true,
+      plateNumber: true,
+      dailyRate: true,
+      weeklyRate: true,
+      monthlyRate: true,
+      securityDeposit: true,
+      minRentalDays: true,
+      maxRentalDays: true,
+      minDriverAge: true,
+      model: {
+        select: {
+          id: true,
+          make: true,
+          model: true,
+          seats: true,
+          transmission: true,
+          fuelType: true,
+          category: { select: { id: true, name: true } },
+        },
+      },
+      images: { select: { url: true }, orderBy: { sortOrder: "asc" }, take: 1 },
+    },
   });
 
   if (candidates.length === 0) {
@@ -121,9 +176,13 @@ export async function findAvailableVehicles(
 
   const candidateIds = candidates.map((v) => v.id);
   const blockedRows = await db.$queryRaw<Array<{ vehicle_id: string }>>`
-    SELECT DISTINCT vehicle_id FROM vehicle_blocks
-    WHERE vehicle_id = ANY(${candidateIds}::uuid[])
-    AND period && tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
+    SELECT DISTINCT vb.vehicle_id FROM vehicle_blocks vb
+    WHERE vb.vehicle_id = ANY(${candidateIds}::uuid[])
+    AND vb.period && tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
+    AND NOT (
+      vb.block_type = 'HOLD'::"BlockType"
+      AND EXISTS (SELECT 1 FROM quotes q WHERE q.id = vb.quote_id AND q.expires_at < now())
+    )
   `;
   const blockedIds = new Set(blockedRows.map((r) => r.vehicle_id));
 
