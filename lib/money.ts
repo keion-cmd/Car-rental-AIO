@@ -1,0 +1,62 @@
+// All money is BigInt in minor units (e.g. PHP centavos). Never float, never
+// Number, never a formatted string — formatting is a render concern (see
+// formatMoney) and must not feed back into arithmetic.
+//
+// BigInt literal syntax (0n) requires an ES2020+ compile target; this repo's
+// tsconfig targets ES2017, so every BigInt value here is built with the
+// BigInt(...) constructor instead.
+
+export type Money = bigint;
+
+const ZERO = BigInt(0);
+const TWO = BigInt(2);
+const HUNDRED = BigInt(100);
+const TEN_THOUSAND = BigInt(10000);
+
+export function add(a: Money, b: Money): Money {
+  return a + b;
+}
+
+export function subtract(a: Money, b: Money): Money {
+  return a - b;
+}
+
+export function multiplyByQty(amount: Money, quantity: number): Money {
+  if (!Number.isInteger(quantity)) {
+    throw new Error("quantity must be an integer");
+  }
+  return amount * BigInt(quantity);
+}
+
+// The single rounding helper for the whole module. Half-up on ties, sign
+// preserved. Every division on money (basis-point tax, per-day tier
+// conversion) must round through this function exactly once — never
+// mid-calculation, never re-rounded downstream.
+export function roundDivision(numerator: bigint, denominator: bigint): Money {
+  if (denominator === ZERO) {
+    throw new Error("division by zero");
+  }
+  const negative = numerator < ZERO !== denominator < ZERO;
+  const absNumerator = numerator < ZERO ? -numerator : numerator;
+  const absDenominator = denominator < ZERO ? -denominator : denominator;
+  const quotient = absNumerator / absDenominator;
+  const remainder = absNumerator % absDenominator;
+  const roundedAbs = remainder * TWO >= absDenominator ? quotient + BigInt(1) : quotient;
+  return negative ? -roundedAbs : roundedAbs;
+}
+
+export function applyBasisPoints(amount: Money, bps: number): Money {
+  if (!Number.isInteger(bps) || bps < 0) {
+    throw new Error("basis points must be a non-negative integer");
+  }
+  return roundDivision(amount * BigInt(bps), TEN_THOUSAND);
+}
+
+// Render-only. Never used to feed a number back into arithmetic.
+export function formatMoney(amount: Money, currency: string): string {
+  const negative = amount < ZERO;
+  const abs = negative ? -amount : amount;
+  const major = abs / HUNDRED;
+  const minor = abs % HUNDRED;
+  return `${negative ? "-" : ""}${currency} ${major}.${minor.toString().padStart(2, "0")}`;
+}
