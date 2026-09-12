@@ -1,0 +1,312 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum VehicleTransmission {
+  MANUAL
+  AUTOMATIC
+}
+
+enum VehicleFuelType {
+  PETROL
+  DIESEL
+  HYBRID
+  ELECTRIC
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  REFUNDED
+}
+
+enum BlockType {
+  BOOKING
+  HOLD
+  MAINTENANCE
+  MANUAL
+  TRANSFER
+}
+
+enum BookingSource {
+  WEBSITE
+  PHONE
+  WALK_IN
+  PARTNER
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  EXPIRED
+  CANCELLED
+}
+
+enum MaintenanceType {
+  SCHEDULED
+  REPAIR
+  INSPECTION
+  CLEANING
+}
+
+enum MaintenanceStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  STAFF
+}
+
+// ==================== TABLES ====================
+
+model Settings {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  currency               String   @default("PHP")
+  defaultTurnaroundMinutes Int    @default(90) @map("default_turnaround_minutes")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("settings")
+}
+
+model User {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String   @unique
+  role        UserRole @default(STAFF)
+  name        String
+  isActive    Boolean  @default(true) @map("is_active")
+  locationIds String[] @default([]) @map("location_ids") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("users")
+}
+
+model Location {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  timezone          String
+  openingHours      Json     @map("opening_hours")
+  turnaroundMinutes Int      @default(90) @map("turnaround_minutes")
+  prepMinutes       Int      @default(30) @map("prep_minutes")
+  isAirport         Boolean  @default(false) @map("is_airport")
+  supportsPickup    Boolean  @default(true) @map("supports_pickup")
+  supportsDropoff   Boolean  @default(true) @map("supports_dropoff")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  vehiclesHome          Vehicle[]      @relation("HomeLocation")
+  vehiclesCurrent       Vehicle[]      @relation("CurrentLocation")
+  locationPairsFrom     LocationPair[] @relation("FromLocation")
+  locationPairsTo       LocationPair[] @relation("ToLocation")
+  vehicleBlocksEndingAt VehicleBlock[] @relation("EndsAtLocation")
+
+  @@map("locations")
+}
+
+model LocationPair {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fromLocationId    String   @map("from_location_id") @db.Uuid
+  toLocationId      String   @map("to_location_id") @db.Uuid
+  isAllowed         Boolean  @default(true) @map("is_allowed")
+  feeAmount         BigInt   @default(0) @map("fee_amount")
+  minTransferHours  Int      @default(0) @map("min_transfer_hours")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  fromLocation Location @relation("FromLocation", fields: [fromLocationId], references: [id])
+  toLocation   Location @relation("ToLocation", fields: [toLocationId], references: [id])
+
+  @@unique([fromLocationId, toLocationId])
+  @@map("location_pairs")
+}
+
+model VehicleCategory {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  models VehicleModel[]
+
+  @@map("vehicle_categories")
+}
+
+model VehicleModel {
+  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId    String              @map("category_id") @db.Uuid
+  make          String
+  model         String
+  seats         Int
+  transmission  VehicleTransmission
+  fuelType      VehicleFuelType     @map("fuel_type")
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+
+  category VehicleCategory @relation(fields: [categoryId], references: [id])
+  vehicles Vehicle[]
+
+  @@map("vehicle_models")
+}
+
+model Vehicle {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  modelId            String   @map("model_id") @db.Uuid
+  plateNumber        String   @unique @map("plate_number")
+  homeLocationId     String   @map("home_location_id") @db.Uuid
+  currentLocationId  String   @map("current_location_id") @db.Uuid
+  isBookableOnline   Boolean  @default(true) @map("is_bookable_online")
+  archivedAt         DateTime? @map("archived_at") @db.Timestamptz
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  model           VehicleModel        @relation(fields: [modelId], references: [id])
+  homeLocation    Location            @relation("HomeLocation", fields: [homeLocationId], references: [id])
+  currentLocation Location            @relation("CurrentLocation", fields: [currentLocationId], references: [id])
+  images          VehicleImage[]
+  blocks          VehicleBlock[]
+  maintenance     MaintenanceRecord[]
+  bookings        Booking[]
+  quotes          Quote[]
+
+  @@map("vehicles")
+}
+
+model VehicleImage {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vehicleId String   @map("vehicle_id") @db.Uuid
+  url       String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@map("vehicle_images")
+}
+
+model Customer {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email     String   @unique
+  name      String
+  phone     String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  quotes   Quote[]
+  bookings Booking[]
+
+  @@map("customers")
+}
+
+model Quote {
+  id                 String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId         String      @map("customer_id") @db.Uuid
+  vehicleId          String      @map("vehicle_id") @db.Uuid
+  pickupLocationId   String      @map("pickup_location_id") @db.Uuid
+  dropoffLocationId  String      @map("dropoff_location_id") @db.Uuid
+  pickupAt           DateTime    @map("pickup_at") @db.Timestamptz
+  returnAt           DateTime    @map("return_at") @db.Timestamptz
+  totalAmount        BigInt      @map("total_amount")
+  currency           String      @default("PHP")
+  status             QuoteStatus @default(DRAFT)
+  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer Customer @relation(fields: [customerId], references: [id])
+  vehicle  Vehicle  @relation(fields: [vehicleId], references: [id])
+
+  @@map("quotes")
+}
+
+model Booking {
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId         String        @map("customer_id") @db.Uuid
+  vehicleId          String        @map("vehicle_id") @db.Uuid
+  pickupLocationId   String        @map("pickup_location_id") @db.Uuid
+  dropoffLocationId  String        @map("dropoff_location_id") @db.Uuid
+  pickupAt           DateTime      @map("pickup_at") @db.Timestamptz
+  returnAt           DateTime      @map("return_at") @db.Timestamptz
+  totalAmount        BigInt        @map("total_amount")
+  currency           String        @default("PHP")
+  status             BookingStatus @default(PENDING)
+  paymentStatus      PaymentStatus @default(UNPAID) @map("payment_status")
+  source             BookingSource @default(WEBSITE)
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer  Customer          @relation(fields: [customerId], references: [id])
+  vehicle   Vehicle           @relation(fields: [vehicleId], references: [id])
+  lineItems BookingLineItem[]
+
+  @@map("bookings")
+}
+
+model BookingLineItem {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId   String   @map("booking_id") @db.Uuid
+  description String
+  amount      BigInt
+  currency    String   @default("PHP")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@map("booking_line_items")
+}
+
+model MaintenanceRecord {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vehicleId   String            @map("vehicle_id") @db.Uuid
+  type        MaintenanceType
+  status      MaintenanceStatus @default(SCHEDULED)
+  scheduledAt DateTime          @map("scheduled_at") @db.Timestamptz
+  completedAt DateTime?         @map("completed_at") @db.Timestamptz
+  notes       String?
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@map("maintenance_records")
+}
+
+model VehicleBlock {
+  id               String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vehicleId        String                 @map("vehicle_id") @db.Uuid
+  blockType        BlockType              @map("block_type")
+  period           Unsupported("tstzrange")
+  endsAtLocationId String?                @map("ends_at_location_id") @db.Uuid
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+
+  // The exclusion constraint and GiST index are created via raw SQL in
+  // prisma/migrations — Prisma cannot express EXCLUDE USING gist.
+
+  vehicle        Vehicle   @relation(fields: [vehicleId], references: [id])
+  endsAtLocation Location? @relation("EndsAtLocation", fields: [endsAtLocationId], references: [id])
+
+  @@map("vehicle_blocks")
+}
