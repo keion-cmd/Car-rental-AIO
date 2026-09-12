@@ -54,20 +54,28 @@ export const bookingSteps = {
   async insertLineItems(tx: Prisma.TransactionClient, data: Prisma.BookingLineItemCreateManyInput[]) {
     return tx.bookingLineItem.createMany({ data });
   },
-  async insertVehicleBlock(tx: Prisma.TransactionClient, vehicleId: string, start: Date, end: Date) {
+  async insertVehicleBlock(tx: Prisma.TransactionClient, vehicleId: string, start: Date, end: Date, bookingId: string) {
     return tx.$executeRaw`
-      INSERT INTO vehicle_blocks (vehicle_id, block_type, period, updated_at)
-      VALUES (${vehicleId}::uuid, 'BOOKING'::"BlockType", tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)'), now())
+      INSERT INTO vehicle_blocks (vehicle_id, block_type, period, booking_id, updated_at)
+      VALUES (${vehicleId}::uuid, 'BOOKING'::"BlockType", tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)'), ${bookingId}::uuid, now())
     `;
+  },
+  // A HOLD block from the quote this booking is converting already occupies
+  // the exclusion constraint's slot for (vehicle_id, period) — inserting a
+  // second BOOKING block for the same window would be rejected by the
+  // vehicle's own hold. Converting the existing row in place avoids that.
+  // quote_id is cleared: if left set, deleting the (now-consumed) quote
+  // later would cascade-delete this booking's block.
+  async convertHoldToBooking(tx: Prisma.TransactionClient, quoteId: string, bookingId: string) {
+    return tx.vehicleBlock.updateMany({
+      where: { quoteId, blockType: "HOLD" },
+      data: { blockType: "BOOKING", bookingId, quoteId: null },
+    });
   },
 };
 
-// bookings has no `reference` column (checked against prisma/schema.prisma)
-// and no schema change is permitted this phase, so the BK-YYYY-NNNN
-// reference is generated here and returned to the caller but NOT
-// persisted — it cannot currently be looked up again after creation. The
-// per-year sequence is still race-free: pg_advisory_xact_lock scopes to
-// this transaction and is released automatically on commit/rollback, so
+// The per-year sequence is race-free: pg_advisory_xact_lock scopes to this
+// transaction and is released automatically on commit/rollback, so
 // concurrent transactions serialise on the same year's counter.
 async function nextReference(tx: Prisma.TransactionClient, now: Date): Promise<string> {
   const year = now.getUTCFullYear();
@@ -115,7 +123,10 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
         return { ok: false, reason };
       }
 
+      const reference = await nextReference(tx, now);
+
       const booking = await bookingSteps.insertBooking(tx, {
+        reference,
         customerId: input.customerId,
         vehicleId: input.vehicleId,
         pickupLocationId: input.pickupLocationId,
@@ -148,14 +159,22 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
         }))
       );
 
-      // Raw insert last: if the vehicle is already blocked for this window,
-      // Postgres raises 23P01 here and the catch below turns it into
-      // VEHICLE_UNAVAILABLE. Everything written above in this transaction
-      // (booking, line items) rolls back with it.
-      const { start, end } = await computeBlockWindow(tx, input.pickupLocationId, input.pickupAt, input.returnAt);
-      await bookingSteps.insertVehicleBlock(tx, input.vehicleId, start, end);
-
-      const reference = await nextReference(tx, now);
+      // If this booking is converting a live quote hold, reuse that block
+      // row rather than inserting a second one — the exclusion constraint
+      // would reject its own customer's hold. Otherwise (no quote, or the
+      // hold already expired/was released) insert fresh: if the vehicle is
+      // already blocked for this window, Postgres raises 23P01 here and the
+      // catch below turns it into VEHICLE_UNAVAILABLE. Everything written
+      // above in this transaction (booking, line items) rolls back with it.
+      let converted = false;
+      if (input.quoteId) {
+        const updateResult = await bookingSteps.convertHoldToBooking(tx, input.quoteId, booking.id);
+        converted = updateResult.count > 0;
+      }
+      if (!converted) {
+        const { start, end } = await computeBlockWindow(tx, input.pickupLocationId, input.pickupAt, input.returnAt);
+        await bookingSteps.insertVehicleBlock(tx, input.vehicleId, start, end, booking.id);
+      }
 
       const result: CreateBookingResult = {
         ok: true,
@@ -181,11 +200,6 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
 export type CancelBookingOutcome = { ok: true } | { ok: false; reason: "BOOKING_NOT_FOUND" | "ALREADY_CANCELLED" };
 
 export async function cancelBooking(bookingId: string, reason: string): Promise<CancelBookingOutcome> {
-  // `reason` has nowhere to persist: bookings has no cancellation-reason
-  // column and no schema change is permitted this phase. Accepted for a
-  // stable call signature; not stored. Deferred — flag to the schema owner.
-  void reason;
-
   return prisma.$transaction(async (tx) => {
     const booking = await tx.booking.findUnique({ where: { id: bookingId } });
     if (!booking) {
@@ -195,22 +209,19 @@ export async function cancelBooking(bookingId: string, reason: string): Promise<
       return { ok: false, reason: "ALREADY_CANCELLED" };
     }
 
-    await tx.booking.update({ where: { id: bookingId }, data: { status: BookingStatus.CANCELLED } });
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: { status: BookingStatus.CANCELLED, cancellationReason: reason, cancelledAt: new Date() },
+    });
 
-    // vehicle_blocks has no bookingId column, so the row is matched by
-    // recomputing the exact period it was created with (same vehicle,
-    // block_type, and window). If Location.prepMinutes/turnaroundMinutes
-    // changed between booking and cancellation, this recomputed window
-    // could miss the row — deferred, would need a bookingId FK on
-    // vehicle_blocks to fix properly.
-    const { start, end } = await computeBlockWindow(tx, booking.pickupLocationId, booking.pickupAt, booking.returnAt);
-    await tx.$executeRaw`
-      DELETE FROM vehicle_blocks
-      WHERE vehicle_id = ${booking.vehicleId}::uuid
-      AND block_type = 'BOOKING'::"BlockType"
-      AND period = tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
-    `;
+    // Found by the bookingId FK, not by recomputing the period — correct
+    // even if the pickup Location's buffer settings changed since creation.
+    await tx.vehicleBlock.deleteMany({ where: { bookingId } });
 
     return { ok: true };
   });
+}
+
+export async function getBookingByReference(reference: string) {
+  return prisma.booking.findUnique({ where: { reference } });
 }

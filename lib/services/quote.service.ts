@@ -1,4 +1,4 @@
-import { PrismaClient, QuoteStatus } from "@prisma/client";
+import { PrismaClient, Prisma, QuoteStatus } from "@prisma/client";
 import {
   quote,
   type QuoteResult,
@@ -7,16 +7,23 @@ import {
   type QuoteSettingsInput,
   type QuoteLocationPairInput,
 } from "../pricing/quote";
-import type { DbClient } from "./availability.service";
+import { computeBlockWindow, type DbClient } from "./availability.service";
 
 const prisma = new PrismaClient();
 
-// Quote has a `status` column but NO `expiresAt` column (checked against
-// prisma/schema.prisma). Per phase instructions, holds require BOTH an
-// expiry field and a HOLD block_type — the latter exists (BlockType.HOLD)
-// but the former does not, so no schema-backed hold is created here.
-// Expiry below is a computed, in-memory TTL for getQuote() only; it is not
-// persisted and does not survive being re-derived from a stale read.
+const EXCLUSION_VIOLATION_CODE = "23P01";
+
+function isExclusionViolation(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError &&
+    err.code === "P2010" &&
+    typeof err.meta?.code === "string" &&
+    err.meta.code === EXCLUSION_VIOLATION_CODE
+  );
+}
+
+// Explicit hold TTL, persisted onto Quote.expiresAt at creation time so it
+// survives a stale in-memory read.
 const QUOTE_TTL_MINUTES = 30;
 
 export type PriceRequestRejectionReason = QuoteRejectionReason | "VEHICLE_NOT_FOUND";
@@ -112,57 +119,76 @@ export interface CreateQuoteInput {
 
 export type CreateQuoteOutcome =
   | { ok: true; quoteId: string; expiresAt: Date; result: QuoteResult }
-  | { ok: false; reason: PriceRequestRejectionReason };
+  | { ok: false; reason: PriceRequestRejectionReason | "VEHICLE_UNAVAILABLE" };
 
 export async function createQuote(input: CreateQuoteInput): Promise<CreateQuoteOutcome> {
   const now = new Date();
+  const expiresAt = computeQuoteExpiresAt(now);
 
-  return prisma.$transaction(async (tx) => {
-    const priced = await priceRequest(tx, {
-      vehicleId: input.vehicleId,
-      pickupLocationId: input.pickupLocationId,
-      returnLocationId: input.dropoffLocationId,
-      pickupAt: input.pickupAt,
-      returnAt: input.returnAt,
-      driverDateOfBirth: input.driverDateOfBirth,
-      now,
-    });
-
-    if (!priced.ok) {
-      return { ok: false, reason: priced.reason };
-    }
-
-    const created = await tx.quote.create({
-      data: {
-        customerId: input.customerId,
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const priced = await priceRequest(tx, {
         vehicleId: input.vehicleId,
         pickupLocationId: input.pickupLocationId,
-        dropoffLocationId: input.dropoffLocationId,
+        returnLocationId: input.dropoffLocationId,
         pickupAt: input.pickupAt,
         returnAt: input.returnAt,
-        subtotalAmount: priced.subtotalAmount,
-        taxAmount: priced.taxAmount,
-        securityDeposit: priced.securityDeposit,
-        rentalDays: priced.rentalDays,
-        totalAmount: priced.totalAmount,
-        currency: priced.currency,
-        status: QuoteStatus.DRAFT,
-        lineItems: {
-          create: priced.lineItems.map((li) => ({
-            type: li.type,
-            description: li.description,
-            quantity: li.quantity,
-            unitAmount: li.unitAmount,
-            totalAmount: li.totalAmount,
-            isTaxable: li.isTaxable,
-            sortOrder: li.sortOrder,
-          })),
-        },
-      },
-    });
+        driverDateOfBirth: input.driverDateOfBirth,
+        now,
+      });
 
-    return { ok: true, quoteId: created.id, expiresAt: computeQuoteExpiresAt(created.createdAt), result: priced };
-  });
+      if (!priced.ok) {
+        return { ok: false, reason: priced.reason };
+      }
+
+      const created = await tx.quote.create({
+        data: {
+          customerId: input.customerId,
+          vehicleId: input.vehicleId,
+          pickupLocationId: input.pickupLocationId,
+          dropoffLocationId: input.dropoffLocationId,
+          pickupAt: input.pickupAt,
+          returnAt: input.returnAt,
+          subtotalAmount: priced.subtotalAmount,
+          taxAmount: priced.taxAmount,
+          securityDeposit: priced.securityDeposit,
+          rentalDays: priced.rentalDays,
+          totalAmount: priced.totalAmount,
+          currency: priced.currency,
+          status: QuoteStatus.DRAFT,
+          expiresAt,
+          lineItems: {
+            create: priced.lineItems.map((li) => ({
+              type: li.type,
+              description: li.description,
+              quantity: li.quantity,
+              unitAmount: li.unitAmount,
+              totalAmount: li.totalAmount,
+              isTaxable: li.isTaxable,
+              sortOrder: li.sortOrder,
+            })),
+          },
+        },
+      });
+
+      // HOLD block reserves the same buffered window createBooking would
+      // use, bound to this quote via quote_id. The shared exclusion
+      // constraint (vehicle_id, period) rejects an overlapping hold or
+      // booking on this vehicle regardless of block_type.
+      const { start, end } = await computeBlockWindow(tx, input.pickupLocationId, input.pickupAt, input.returnAt);
+      await tx.$executeRaw`
+        INSERT INTO vehicle_blocks (vehicle_id, block_type, period, quote_id, updated_at)
+        VALUES (${input.vehicleId}::uuid, 'HOLD'::"BlockType", tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)'), ${created.id}::uuid, now())
+      `;
+
+      return { ok: true, quoteId: created.id, expiresAt, result: priced };
+    });
+  } catch (err) {
+    if (isExclusionViolation(err)) {
+      return { ok: false, reason: "VEHICLE_UNAVAILABLE" };
+    }
+    throw err;
+  }
 }
 
 export async function getQuote(id: string) {
@@ -170,7 +196,17 @@ export async function getQuote(id: string) {
   if (!found) {
     return null;
   }
-  const expiresAt = computeQuoteExpiresAt(found.createdAt);
-  const isExpired = Date.now() > expiresAt.getTime();
-  return { quote: found, expiresAt, isExpired };
+  const isExpired = Date.now() > found.expiresAt.getTime();
+  return { quote: found, expiresAt: found.expiresAt, isExpired };
+}
+
+// Plain function, no scheduler — callers (or a future scheduler, out of
+// scope for this phase) invoke this to reclaim vehicle_blocks rows for
+// holds whose quote has expired. Returns the number of blocks deleted.
+export async function releaseExpiredHolds(): Promise<number> {
+  return prisma.$executeRaw`
+    DELETE FROM vehicle_blocks
+    WHERE block_type = 'HOLD'::"BlockType"
+    AND quote_id IN (SELECT id FROM quotes WHERE expires_at < now())
+  `;
 }

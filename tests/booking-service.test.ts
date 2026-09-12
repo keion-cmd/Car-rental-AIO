@@ -3,7 +3,8 @@ import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { isVehicleAvailable, findAvailableVehicles } from "../lib/services/availability.service";
-import { createBooking, cancelBooking, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
+import { createBooking, cancelBooking, getBookingByReference, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
+import { createQuote, releaseExpiredHolds, type CreateQuoteInput } from "../lib/services/quote.service";
 import { quote, type QuoteSettingsInput } from "../lib/pricing/quote";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
@@ -132,6 +133,7 @@ afterAll(async () => {
   await prisma.bookingLineItem.deleteMany({ where: { booking: { vehicleId: { in: vehicleIds } } } });
   await prisma.booking.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.vehicleBlock.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
+  await prisma.quote.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.vehicle.deleteMany({ where: { id: { in: vehicleIds } } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
   await prisma.vehicleModel.deleteMany({ where: { id: modelId } });
@@ -477,4 +479,274 @@ describe("cancellation", () => {
     if (second.ok) throw new Error("expected rejection");
     expect(second.reason).toBe("ALREADY_CANCELLED");
   });
+});
+
+function quoteInput(overrides: Partial<CreateQuoteInput> & { vehicleId: string } & Record<string, unknown>) {
+  return {
+    customerId,
+    pickupLocationId: locNoBuffer,
+    dropoffLocationId: locNoBuffer,
+    pickupAt: futureDate("2033-01-01T00:00:00Z"),
+    returnAt: futureDate("2033-01-02T00:00:00Z"),
+    driverDateOfBirth: ADULT_DOB,
+    ...overrides,
+  };
+}
+
+describe("reference persistence", () => {
+  it("25. createBooking persists reference; it is readable from the DB", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-01T00:00:00Z"), returnAt: futureDate("2032-04-02T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: outcome.bookingId } });
+    expect(booking.reference).toBe(outcome.reference);
+  });
+
+  it("26. getBookingByReference returns the correct booking", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-05T00:00:00Z"), returnAt: futureDate("2032-04-06T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const found = await getBookingByReference(outcome.reference);
+    expect(found?.id).toBe(outcome.bookingId);
+  });
+
+  it("27. two bookings cannot share a reference", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-10T00:00:00Z"), returnAt: futureDate("2032-04-11T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    await expect(
+      prisma.booking.create({
+        data: {
+          reference: outcome.reference,
+          customerId,
+          vehicleId: vehicle.id,
+          pickupLocationId: locNoBuffer,
+          dropoffLocationId: locNoBuffer,
+          pickupAt: futureDate("2032-04-12T00:00:00Z"),
+          returnAt: futureDate("2032-04-13T00:00:00Z"),
+          totalAmount: BigInt(1000),
+        },
+      })
+    ).rejects.toThrow();
+  });
+});
+
+describe("block linkage", () => {
+  it("28. the created block has bookingId set to the booking's id", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-15T00:00:00Z"), returnAt: futureDate("2032-04-16T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const block = await prisma.vehicleBlock.findFirstOrThrow({ where: { vehicleId: vehicle.id } });
+    expect(block.bookingId).toBe(outcome.bookingId);
+  });
+
+  it("29. cancelBooking deletes the block found BY bookingId", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-20T00:00:00Z"), returnAt: futureDate("2032-04-21T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const blockBefore = await prisma.vehicleBlock.findFirstOrThrow({ where: { bookingId: outcome.bookingId } });
+    expect(blockBefore.bookingId).toBe(outcome.bookingId);
+
+    await cancelBooking(outcome.bookingId, "customer requested");
+    const blockAfter = await prisma.vehicleBlock.findUnique({ where: { id: blockBefore.id } });
+    expect(blockAfter).toBeNull();
+  });
+
+  it("30. REGRESSION: cancellation still finds the block after the pickup Location's turnaroundMinutes changes", async () => {
+    const regressionLoc = await prisma.location.create({
+      data: { name: `__bkt_loc_regression__${Date.now()}`, timezone: "UTC", openingHours: {}, prepMinutes: 0, turnaroundMinutes: 30 },
+    });
+    let vehicle: Awaited<ReturnType<typeof createVehicle>> | undefined;
+    try {
+      vehicle = await createVehicle({ currentLocationId: regressionLoc.id });
+      const outcome = await createBooking(
+        bookingInput({
+          vehicleId: vehicle.id,
+          pickupLocationId: regressionLoc.id,
+          dropoffLocationId: regressionLoc.id,
+          pickupAt: futureDate("2032-04-25T00:00:00Z"),
+          returnAt: futureDate("2032-04-26T00:00:00Z"),
+        })
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected success");
+
+      // Old recompute-the-period cancellation logic would miss the block
+      // here, since the window it recomputes no longer matches what was
+      // stored at creation time.
+      await prisma.location.update({ where: { id: regressionLoc.id }, data: { turnaroundMinutes: 240 } });
+
+      const cancelOutcome = await cancelBooking(outcome.bookingId, "customer requested");
+      expect(cancelOutcome.ok).toBe(true);
+
+      const blocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: vehicle.id } });
+      expect(blocks).toHaveLength(0);
+    } finally {
+      // The vehicle (home/current location) still references regressionLoc;
+      // afterAll's normal cleanup handles the vehicle, so only remove the
+      // location's back-reference here, not the vehicle itself.
+      if (vehicle) {
+        await prisma.vehicle.update({ where: { id: vehicle.id }, data: { homeLocationId: locNoBuffer, currentLocationId: locNoBuffer } });
+      }
+      await prisma.location.delete({ where: { id: regressionLoc.id } });
+    }
+  });
+
+  it("31. deleting a booking row cascades to delete its block", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-04-30T00:00:00Z"), returnAt: futureDate("2032-05-01T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    await prisma.bookingLineItem.deleteMany({ where: { bookingId: outcome.bookingId } });
+    await prisma.booking.delete({ where: { id: outcome.bookingId } });
+
+    const blocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: vehicle.id } });
+    expect(blocks).toHaveLength(0);
+  });
+});
+
+describe("cancellation persistence", () => {
+  it("32. cancellationReason and cancelledAt are persisted", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2032-05-05T00:00:00Z"), returnAt: futureDate("2032-05-06T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    await cancelBooking(outcome.bookingId, "customer requested refund");
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: outcome.bookingId } });
+    expect(booking.cancellationReason).toBe("customer requested refund");
+    expect(booking.cancelledAt).not.toBeNull();
+  });
+});
+
+describe("quote holds", () => {
+  it("33. createQuote inserts a HOLD block bound to the quote", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt: futureDate("2033-02-01T00:00:00Z"), returnAt: futureDate("2033-02-02T00:00:00Z") }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const block = await prisma.vehicleBlock.findFirstOrThrow({ where: { vehicleId: vehicle.id } });
+    expect(block.blockType).toBe("HOLD");
+    expect(block.quoteId).toBe(outcome.quoteId);
+  });
+
+  it("34. a second overlapping quote for the same vehicle is REJECTED while the first hold is live", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const first = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt: futureDate("2033-02-05T00:00:00Z"), returnAt: futureDate("2033-02-06T00:00:00Z") }));
+    expect(first.ok).toBe(true);
+
+    const second = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt: futureDate("2033-02-05T12:00:00Z"), returnAt: futureDate("2033-02-06T12:00:00Z") }));
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error("expected rejection");
+    expect(second.reason).toBe("VEHICLE_UNAVAILABLE");
+  });
+
+  it("35. createBooking from a quote results in exactly ONE block, type BOOKING, bookingId set, quoteId cleared", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const pickupAt = futureDate("2033-02-10T00:00:00Z");
+    const returnAt = futureDate("2033-02-11T00:00:00Z");
+    const quoteOutcome = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt, returnAt }));
+    expect(quoteOutcome.ok).toBe(true);
+    if (!quoteOutcome.ok) throw new Error("expected quote success");
+
+    const bookingOutcome = await createBooking(
+      bookingInput({ vehicleId: vehicle.id, pickupAt, returnAt, quoteId: quoteOutcome.quoteId })
+    );
+    expect(bookingOutcome.ok).toBe(true);
+    if (!bookingOutcome.ok) throw new Error("expected booking success");
+
+    const blocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: vehicle.id } });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].blockType).toBe("BOOKING");
+    expect(blocks[0].bookingId).toBe(bookingOutcome.bookingId);
+    // quoteId is cleared on conversion: leaving it set would let deleting
+    // the now-consumed quote cascade-delete this booking's own block.
+    expect(blocks[0].quoteId).toBeNull();
+  });
+
+  it("36. an EXPIRED hold does not block availability even before releaseExpiredHolds() runs", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const pickupAt = futureDate("2033-02-15T00:00:00Z");
+    const returnAt = futureDate("2033-02-16T00:00:00Z");
+    const quoteOutcome = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt, returnAt }));
+    expect(quoteOutcome.ok).toBe(true);
+    if (!quoteOutcome.ok) throw new Error("expected quote success");
+
+    await prisma.quote.update({ where: { id: quoteOutcome.quoteId }, data: { expiresAt: new Date(Date.now() - 60_000) } });
+
+    const available = await isVehicleAvailable(vehicle.id, pickupAt, returnAt);
+    expect(available).toBe(true);
+  });
+
+  it("37. releaseExpiredHolds deletes expired holds and leaves live ones", async () => {
+    const expiredVehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const liveVehicle = await createVehicle({ currentLocationId: locNoBuffer });
+
+    const expiredQuote = await createQuote(quoteInput({ vehicleId: expiredVehicle.id, pickupAt: futureDate("2033-02-20T00:00:00Z"), returnAt: futureDate("2033-02-21T00:00:00Z") }));
+    const liveQuote = await createQuote(quoteInput({ vehicleId: liveVehicle.id, pickupAt: futureDate("2033-02-22T00:00:00Z"), returnAt: futureDate("2033-02-23T00:00:00Z") }));
+    expect(expiredQuote.ok).toBe(true);
+    expect(liveQuote.ok).toBe(true);
+    if (!expiredQuote.ok || !liveQuote.ok) throw new Error("expected success");
+
+    await prisma.quote.update({ where: { id: expiredQuote.quoteId }, data: { expiresAt: new Date(Date.now() - 60_000) } });
+
+    await releaseExpiredHolds();
+
+    const expiredBlocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: expiredVehicle.id } });
+    const liveBlocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: liveVehicle.id } });
+    expect(expiredBlocks).toHaveLength(0);
+    expect(liveBlocks).toHaveLength(1);
+  });
+
+  it("38. deleting a quote cascades to delete its hold block", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const quoteOutcome = await createQuote(quoteInput({ vehicleId: vehicle.id, pickupAt: futureDate("2033-02-25T00:00:00Z"), returnAt: futureDate("2033-02-26T00:00:00Z") }));
+    expect(quoteOutcome.ok).toBe(true);
+    if (!quoteOutcome.ok) throw new Error("expected success");
+
+    await prisma.quoteLineItem.deleteMany({ where: { quoteId: quoteOutcome.quoteId } });
+    await prisma.quote.delete({ where: { id: quoteOutcome.quoteId } });
+
+    const blocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: vehicle.id } });
+    expect(blocks).toHaveLength(0);
+  });
+});
+
+describe("concurrency re-verification after block-insertion changes", () => {
+  it(
+    "39. 50 parallel createBooking calls, same vehicle, same window -> exactly 1 success, 1 booking row, 1 block row",
+    async () => {
+      const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+      const input = bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2033-03-01T00:00:00Z"), returnAt: futureDate("2033-03-02T00:00:00Z") });
+
+      const attempts = Array.from({ length: 50 }, () => createBooking(input));
+      const results = await Promise.all(attempts);
+
+      const successes = results.filter((r) => r.ok);
+      const failures = results.filter((r) => !r.ok);
+      expect(successes).toHaveLength(1);
+      expect(failures).toHaveLength(49);
+      for (const f of failures) {
+        if (!f.ok) expect(f.reason).toBe("VEHICLE_UNAVAILABLE");
+      }
+
+      const bookings = await prisma.booking.findMany({ where: { vehicleId: vehicle.id } });
+      const blocks = await prisma.vehicleBlock.findMany({ where: { vehicleId: vehicle.id } });
+      expect(bookings).toHaveLength(1);
+      expect(blocks).toHaveLength(1);
+    },
+    60_000
+  );
 });
