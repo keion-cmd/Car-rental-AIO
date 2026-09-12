@@ -279,12 +279,17 @@ model Quote {
   totalAmount        BigInt      @map("total_amount")
   currency           String      @default("PHP")
   status             QuoteStatus @default(DRAFT)
+  // Explicit, queryable hold expiry — replaces the prior in-memory 30-minute
+  // TTL derived from createdAt. Required: a quote without an expiry cannot
+  // back a HOLD block.
+  expiresAt          DateTime    @map("expires_at") @db.Timestamptz
   createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz
 
-  customer  Customer        @relation(fields: [customerId], references: [id])
-  vehicle   Vehicle         @relation(fields: [vehicleId], references: [id])
-  lineItems QuoteLineItem[]
+  customer   Customer        @relation(fields: [customerId], references: [id])
+  vehicle    Vehicle         @relation(fields: [vehicleId], references: [id])
+  lineItems  QuoteLineItem[]
+  holdBlocks VehicleBlock[]
 
   @@map("quotes")
 }
@@ -310,6 +315,9 @@ model QuoteLineItem {
 
 model Booking {
   id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // No @default: a booking created without a reference is the same class of
+  // bug as a money column silently defaulting to 0. Callers must supply it.
+  reference          String        @unique
   customerId         String        @map("customer_id") @db.Uuid
   vehicleId          String        @map("vehicle_id") @db.Uuid
   pickupLocationId   String        @map("pickup_location_id") @db.Uuid
@@ -327,12 +335,15 @@ model Booking {
   status             BookingStatus @default(PENDING)
   paymentStatus      PaymentStatus @default(UNPAID) @map("payment_status")
   source             BookingSource @default(WEBSITE)
+  cancellationReason String?       @map("cancellation_reason")
+  cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz
   createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
   customer  Customer          @relation(fields: [customerId], references: [id])
   vehicle   Vehicle           @relation(fields: [vehicleId], references: [id])
   lineItems BookingLineItem[]
+  blocks    VehicleBlock[]
 
   @@map("bookings")
 }
@@ -379,6 +390,11 @@ model VehicleBlock {
   blockType        BlockType              @map("block_type")
   period           Unsupported("tstzrange")
   endsAtLocationId String?                @map("ends_at_location_id") @db.Uuid
+  // Nullable — a MAINTENANCE or MANUAL block belongs to neither a booking
+  // nor a quote. Cascade: deleting the booking/quote it holds for must not
+  // leave an orphan block holding a vehicle hostage.
+  bookingId        String?                @map("booking_id") @db.Uuid
+  quoteId          String?                @map("quote_id") @db.Uuid
   createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -387,6 +403,9 @@ model VehicleBlock {
 
   vehicle        Vehicle   @relation(fields: [vehicleId], references: [id])
   endsAtLocation Location? @relation("EndsAtLocation", fields: [endsAtLocationId], references: [id])
+  booking        Booking?  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  quote          Quote?    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
 
+  @@index([bookingId])
   @@map("vehicle_blocks")
 }
