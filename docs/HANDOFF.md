@@ -72,6 +72,21 @@ Do not, without explicit sign-off:
 - Change timestamp storage away from `timestamptz` / UTC
 - Change the half-open `[start, end)` range semantics used for block/booking periods
 
+## Known debt (P1-P4)
+
+- `app/page.tsx` contains hardcoded `fleet` and `locations` arrays with invented field
+  names that do not match `Vehicle` / `VehicleModel` / `VehicleCategory` / `Location`. To be
+  replaced with real queries.
+- Prices are pre-formatted strings (e.g. "₱1,850"). Must become BIGINT minor units
+  formatted at render time. Never reintroduce string or float money.
+- The search form's submit handler only calls `preventDefault()` and sets a boolean. It
+  does not search.
+- Date and time inputs are uncontrolled static defaults with no timezone handling.
+- Drop-off location exists but is hidden behind a "Return to a different location"
+  checkbox. Acceptable as a progressive-disclosure pattern; it must remain functional, not
+  decorative.
+- `app/page.tsx` is one monolithic file. Extraction is deferred, not forgotten.
+
 ## Vercel
 
 The Vercel project is connected to this repo and will trigger a deployment on every push
