@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "./booking.service";
 import { createBooking, type CreateBookingOutcome } from "./booking.service";
 import {
@@ -13,6 +14,16 @@ import { findOrCreateCustomer } from "./customer.service";
 import { assumedDriverDateOfBirth } from "./search.service";
 import { validateDriverLicence, type DriverLicenceRejectionReason } from "../validation/booking";
 import type { QuoteResult } from "../pricing/quote";
+import { queueNotification } from "./notification.service";
+import { formatMoney } from "../money";
+import type { BookingReceivedPayload } from "../notifications/templates/booking-received";
+
+const CONTACT_EMAIL = "hello@amihancars.ph";
+const CONTACT_PHONE = "+63 2 8555 0188";
+
+function formatDateTime(date: Date): string {
+  return new Intl.DateTimeFormat("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(date);
+}
 
 // This module holds the plain, framework-free business logic behind the
 // four-step guest checkout. app/actions/booking-flow.ts wraps these in
@@ -186,6 +197,55 @@ export async function submitBooking(input: SubmitBookingInput, now: Date = new D
       if (!outcome.ok) {
         throw new BookingRejected(outcome);
       }
+
+      // Written in the SAME transaction as the booking — a booking the
+      // customer is never told about is worse than a failed booking they
+      // can retry, so a queueing failure must roll back the booking too.
+      const full = await tx.booking.findUniqueOrThrow({
+        where: { id: outcome.bookingId },
+        include: {
+          lineItems: { orderBy: { sortOrder: "asc" } },
+          vehicle: { include: { model: true } },
+        },
+      });
+      const [pickupLocation, returnLocation] = await Promise.all([
+        tx.location.findUniqueOrThrow({ where: { id: full.pickupLocationId } }),
+        tx.location.findUniqueOrThrow({ where: { id: full.dropoffLocationId } }),
+      ]);
+
+      const payload: BookingReceivedPayload = {
+        reference: full.reference,
+        vehicleName: `${full.vehicle.model.make} ${full.vehicle.model.model}`,
+        pickupAt: formatDateTime(full.pickupAt),
+        pickupLocationName: pickupLocation.name,
+        returnAt: formatDateTime(full.returnAt),
+        returnLocationName: returnLocation.name,
+        durationLabel: `${full.rentalDays} day${full.rentalDays === 1 ? "" : "s"}`,
+        lineItems: full.lineItems.map((li) => ({
+          description: li.description,
+          amount: formatMoney(li.totalAmount, full.currency),
+        })),
+        subtotal: formatMoney(full.subtotalAmount, full.currency),
+        tax: formatMoney(full.taxAmount, full.currency),
+        total: formatMoney(full.totalAmount, full.currency),
+        securityDeposit: formatMoney(full.securityDeposit, full.currency),
+        driverFullName: full.driverFullName,
+        contactEmail: CONTACT_EMAIL,
+        contactPhone: CONTACT_PHONE,
+      };
+
+      await queueNotification(
+        {
+          type: "BOOKING_RECEIVED",
+          channel: "EMAIL",
+          recipient: full.driverEmail,
+          bookingId: full.id,
+          templateKey: "booking-received",
+          payload: payload as unknown as Prisma.InputJsonValue,
+        },
+        tx
+      );
+
       return outcome;
     });
   } catch (err) {
