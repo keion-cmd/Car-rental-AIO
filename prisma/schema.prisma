@@ -265,7 +265,12 @@ model Customer {
 
 model Quote {
   id                 String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  customerId         String      @map("customer_id") @db.Uuid
+  // Nullable: a quote is a hold on a vehicle, created when the customer
+  // clicks Select — necessarily before any identity is collected. Identity
+  // arrives later via attachCustomerToQuote(), or never (an abandoned quote
+  // is the normal case, not an error). Booking.customerId stays required —
+  // a booking always has a customer.
+  customerId         String?     @map("customer_id") @db.Uuid
   vehicleId          String      @map("vehicle_id") @db.Uuid
   pickupLocationId   String      @map("pickup_location_id") @db.Uuid
   dropoffLocationId  String      @map("dropoff_location_id") @db.Uuid
@@ -287,7 +292,7 @@ model Quote {
   createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz
 
-  customer   Customer        @relation(fields: [customerId], references: [id])
+  customer   Customer?       @relation(fields: [customerId], references: [id])
   vehicle    Vehicle         @relation(fields: [vehicleId], references: [id])
   lineItems  QuoteLineItem[]
   holdBlocks VehicleBlock[]
