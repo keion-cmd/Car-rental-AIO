@@ -1,8 +1,19 @@
-// Variants are the real enum values used by BookingStatus and BlockType in
-// prisma/schema.prisma. The brief also asked for an OVERDUE (red) variant,
-// but no OVERDUE value exists in any schema enum — inventing one is
-// explicitly out of scope for this phase, so it is omitted here.
-export type StatusBadgeVariant = "PENDING" | "CONFIRMED" | "ONGOING" | "COMPLETED" | "CANCELLED" | "MAINTENANCE";
+// Variants are the real enum values used by BookingStatus, PaymentStatus and
+// BlockType in prisma/schema.prisma. The brief also asked for an OVERDUE
+// (red) variant, but no OVERDUE value exists in any schema enum — inventing
+// one is explicitly out of scope for this phase, so it is omitted here.
+// Lateness is shown instead as a separate derived-flag badge by callers.
+export type StatusBadgeVariant =
+  | "PENDING"
+  | "CONFIRMED"
+  | "ONGOING"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "MAINTENANCE"
+  | "UNPAID"
+  | "PARTIALLY_PAID"
+  | "PAID"
+  | "REFUNDED";
 
 const VARIANT_CLASS: Record<StatusBadgeVariant, string> = {
   PENDING: "admin-badge-amber",
@@ -11,6 +22,10 @@ const VARIANT_CLASS: Record<StatusBadgeVariant, string> = {
   COMPLETED: "admin-badge-grey",
   CANCELLED: "admin-badge-grey-outline",
   MAINTENANCE: "admin-badge-purple",
+  UNPAID: "admin-badge-amber",
+  PARTIALLY_PAID: "admin-badge-blue",
+  PAID: "admin-badge-green",
+  REFUNDED: "admin-badge-grey-outline",
 };
 
 // Icons are plain glyphs, not an icon library — colour is never the only
@@ -22,6 +37,10 @@ const VARIANT_ICON: Record<StatusBadgeVariant, string> = {
   COMPLETED: "■", // filled square
   CANCELLED: "✕", // cross
   MAINTENANCE: "⚙", // gear
+  UNPAID: "○",
+  PARTIALLY_PAID: "◐",
+  PAID: "✓",
+  REFUNDED: "↺",
 };
 
 export function StatusBadge({ variant, label }: { variant: StatusBadgeVariant; label?: string }) {
