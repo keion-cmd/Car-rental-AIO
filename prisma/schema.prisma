@@ -249,12 +249,13 @@ model VehicleImage {
 }
 
 model Customer {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email     String   @unique
-  name      String
-  phone     String?
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String    @unique
+  name        String
+  phone       String?
+  dateOfBirth DateTime? @map("date_of_birth") @db.Timestamptz
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   quotes   Quote[]
   bookings Booking[]
@@ -337,6 +338,19 @@ model Booking {
   source             BookingSource @default(WEBSITE)
   cancellationReason String?       @map("cancellation_reason")
   cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz
+  // The driver of record, snapshotted at booking time. Distinct from
+  // Customer.* because the person who books is not always the person who
+  // drives, and because a licence on file must reflect what was true on the
+  // day of this booking even if the customer's own record changes later.
+  // driverLicenceNumber is identity-document data — encrypted at rest via
+  // lib/crypto/field-encryption.ts, never selected into a public-facing
+  // response (see getBookingByReference).
+  driverLicenceNumber  String        @map("driver_licence_number")
+  driverLicenceCountry String        @map("driver_licence_country")
+  driverLicenceExpiry  DateTime      @map("driver_licence_expiry") @db.Timestamptz
+  driverFullName       String        @map("driver_full_name")
+  driverPhone          String        @map("driver_phone")
+  driverEmail          String        @map("driver_email")
   createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
