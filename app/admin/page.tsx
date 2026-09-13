@@ -1,39 +1,22 @@
-import type { Metadata } from "next";
 import { requireAuth } from "../../lib/auth/guard";
-import { logoutAction } from "../actions/auth";
+import { PageHeader } from "../components/admin/PageHeader";
+import { EmptyState } from "../components/admin/EmptyState";
 
-export const metadata: Metadata = {
-  title: "Staff dashboard | Amihan Car Rentals",
-  robots: { index: false, follow: false },
-};
-
-// Behind requireAuth(), which reads the session cookie per request — never
-// cached or frozen at build time.
 export const dynamic = "force-dynamic";
 
-// Placeholder proving the guard works — STAFF is the lowest role, so this
-// route is reachable by every signed-in staff account. The real admin
-// shell (nav, sections, feature screens) is P4-P2.
-export default async function AdminHomePage() {
-  const user = await requireAuth("STAFF");
+// Lowest role in the hierarchy — every signed-in staff account reaches
+// Overview. Each admin route calls requireAuth independently; the sidebar
+// hiding a link is UX, this call is the actual gate.
+export default async function AdminOverviewPage() {
+  await requireAuth("STAFF");
 
   return (
-    <main>
-      <section className="section search-results-section">
-        <div className="container">
-          <div className="eyebrow">
-            <span /> STAFF AREA
-          </div>
-          <h3>
-            Signed in as {user.name} <em>({user.role})</em>
-          </h3>
-          <form action={logoutAction}>
-            <button type="submit" className="outline-button">
-              Log out
-            </button>
-          </form>
-        </div>
-      </section>
-    </main>
+    <>
+      <PageHeader title="Overview" description="A daily snapshot of what needs attention across the fleet." />
+      <EmptyState
+        heading="No data yet"
+        description="Once bookings, fleet and payment activity are wired up, this page will summarize what needs attention today."
+      />
+    </>
   );
 }
