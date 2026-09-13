@@ -201,8 +201,23 @@ export async function attachCustomerToQuote(quoteId: string, customerId: string,
   return tx.quote.update({ where: { id: quoteId }, data: { customerId } });
 }
 
+// vehicle/model/category/images are included alongside lineItems so the
+// booking flow's review step can render the car without a second query —
+// booking.service.ts's expiry check only reads isExpired, so this addition
+// is invisible to it.
 export async function getQuote(id: string) {
-  const found = await prisma.quote.findUnique({ where: { id }, include: { lineItems: true } });
+  const found = await prisma.quote.findUnique({
+    where: { id },
+    include: {
+      lineItems: { orderBy: { sortOrder: "asc" } },
+      vehicle: {
+        include: {
+          model: { include: { category: true } },
+          images: { orderBy: { sortOrder: "asc" }, take: 1 },
+        },
+      },
+    },
+  });
   if (!found) {
     return null;
   }

@@ -63,7 +63,7 @@ export function parseSearchParams(raw: RawSearchParams): ReturnType<typeof searc
 // price as a standard adult driver clear of every seeded vehicle's
 // minDriverAge and above Settings.youngDriverMaxAge, so the displayed total
 // is the base rate a typical adult pays; booking re-prices with the real DOB.
-function assumedDriverDateOfBirth(now: Date): Date {
+export function assumedDriverDateOfBirth(now: Date): Date {
   const dob = new Date(now);
   dob.setUTCFullYear(now.getUTCFullYear() - 30);
   return dob;

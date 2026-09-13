@@ -3,6 +3,7 @@ import { runVehicleSearch, type RawSearchParams } from "../../lib/services/searc
 import { listLocations } from "../../lib/services/catalog.service";
 import { formatMoney } from "../../lib/money";
 import { SearchForm } from "../components/SearchForm";
+import { selectVehicleAction } from "../actions/booking-flow";
 
 // Date-bound results must never be indexed — the URL is only meaningful for
 // the criteria it encodes at the moment it was generated.
@@ -59,11 +60,20 @@ export default async function SearchPage({
   const { criteria, vehicles } = outcome;
   const pickupLocation = locations.find((l) => l.id === criteria.pickupLocationId);
   const timeZone = pickupLocation?.timezone ?? "UTC";
+  const notice = typeof raw.notice === "string" ? raw.notice : undefined;
 
   return (
     <main>
       <section className="section search-results-section">
         <div className="container">
+          {notice === "unavailable" && (
+            <p className="search-notice">
+              That car was just booked by someone else. Here are the other cars still available for your dates.
+            </p>
+          )}
+          {notice === "select-failed" && (
+            <p className="search-notice">We couldn&apos;t start a booking for that car. Please try another one.</p>
+          )}
           <div className="search-summary">
             <div className="search-summary-text">
               <span className="eyebrow">
@@ -134,9 +144,20 @@ export default async function SearchPage({
                   </div>
                   <div className="fleet-card-footer">
                     <span className="daily-rate">{formatMoney(vehicle.dailyRate, vehicle.currency)} / day</span>
-                    <button className="outline-button" type="button" disabled>
-                      Select <span>↗</span>
-                    </button>
+                    <form action={selectVehicleAction}>
+                      <input type="hidden" name="vehicleId" value={vehicle.id} />
+                      <input type="hidden" name="pickupLocationId" value={criteria.pickupLocationId} />
+                      <input type="hidden" name="dropoffLocationId" value={criteria.dropoffLocationId} />
+                      <input type="hidden" name="pickupAt" value={criteria.pickupAt.toISOString()} />
+                      <input type="hidden" name="returnAt" value={criteria.returnAt.toISOString()} />
+                      <input type="hidden" name="pickupDate" value={String(raw.pickupDate ?? "")} />
+                      <input type="hidden" name="pickupTime" value={String(raw.pickupTime ?? "")} />
+                      <input type="hidden" name="returnDate" value={String(raw.returnDate ?? "")} />
+                      <input type="hidden" name="returnTime" value={String(raw.returnTime ?? "")} />
+                      <button className="outline-button" type="submit">
+                        Select <span>↗</span>
+                      </button>
+                    </form>
                   </div>
                 </article>
               ))}
