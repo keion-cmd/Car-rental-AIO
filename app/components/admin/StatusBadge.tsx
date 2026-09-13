@@ -13,7 +13,15 @@ export type StatusBadgeVariant =
   | "UNPAID"
   | "PARTIALLY_PAID"
   | "PAID"
-  | "REFUNDED";
+  | "REFUNDED"
+  // Fleet-derived vehicle statuses (lib/services/fleet.service.ts) — not
+  // BookingStatus/PaymentStatus values, but the same badge component covers
+  // them since AVAILABLE/RESERVED/BLOCKED share no name collision with the
+  // above.
+  | "AVAILABLE"
+  | "RENTED"
+  | "RESERVED"
+  | "BLOCKED";
 
 const VARIANT_CLASS: Record<StatusBadgeVariant, string> = {
   PENDING: "admin-badge-amber",
@@ -26,6 +34,10 @@ const VARIANT_CLASS: Record<StatusBadgeVariant, string> = {
   PARTIALLY_PAID: "admin-badge-blue",
   PAID: "admin-badge-green",
   REFUNDED: "admin-badge-grey-outline",
+  AVAILABLE: "admin-badge-green",
+  RENTED: "admin-badge-blue",
+  RESERVED: "admin-badge-amber",
+  BLOCKED: "admin-badge-grey-outline",
 };
 
 // Icons are plain glyphs, not an icon library — colour is never the only
@@ -41,6 +53,10 @@ const VARIANT_ICON: Record<StatusBadgeVariant, string> = {
   PARTIALLY_PAID: "◐",
   PAID: "✓",
   REFUNDED: "↺",
+  AVAILABLE: "✓",
+  RENTED: "▶",
+  RESERVED: "○",
+  BLOCKED: "✕",
 };
 
 export function StatusBadge({ variant, label }: { variant: StatusBadgeVariant; label?: string }) {
