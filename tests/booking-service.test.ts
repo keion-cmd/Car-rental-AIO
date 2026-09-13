@@ -4,7 +4,7 @@ import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { isVehicleAvailable, findAvailableVehicles } from "../lib/services/availability.service";
 import { createBooking, cancelBooking, getBookingByReference, getDriverLicenceNumber, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
-import { createQuote, releaseExpiredHolds, type CreateQuoteInput } from "../lib/services/quote.service";
+import { createQuote, attachCustomerToQuote, releaseExpiredHolds, type CreateQuoteInput } from "../lib/services/quote.service";
 import { quote, type QuoteSettingsInput } from "../lib/pricing/quote";
 import { encryptField, decryptField } from "../lib/crypto/field-encryption";
 import { findOrCreateCustomer } from "../lib/services/customer.service";
@@ -972,5 +972,219 @@ describe("driver field persistence", () => {
     const found = await getBookingByReference(outcome.reference);
     expect(found).not.toBeNull();
     expect(found).not.toHaveProperty("driverLicenceNumber");
+  });
+});
+
+describe("nullable quote customer", () => {
+  it("54. createQuote without a customerId succeeds and persists null", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createQuote(
+      quoteInput({ vehicleId: vehicle.id, customerId: undefined, pickupAt: futureDate("2033-04-01T00:00:00Z"), returnAt: futureDate("2033-04-02T00:00:00Z") })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const stored = await prisma.quote.findUniqueOrThrow({ where: { id: outcome.quoteId } });
+    expect(stored.customerId).toBeNull();
+  });
+
+  it("55. the HOLD block is created identically whether or not a customerId was supplied", async () => {
+    const vehicleA = await createVehicle({ currentLocationId: locNoBuffer });
+    const vehicleB = await createVehicle({ currentLocationId: locNoBuffer });
+    const pickupAt = futureDate("2033-04-05T00:00:00Z");
+    const returnAt = futureDate("2033-04-06T00:00:00Z");
+
+    const withCustomer = await createQuote(quoteInput({ vehicleId: vehicleA.id, pickupAt, returnAt }));
+    const withoutCustomer = await createQuote(quoteInput({ vehicleId: vehicleB.id, customerId: undefined, pickupAt, returnAt }));
+    expect(withCustomer.ok).toBe(true);
+    expect(withoutCustomer.ok).toBe(true);
+    if (!withCustomer.ok || !withoutCustomer.ok) throw new Error("expected success");
+
+    const blockA = await prisma.vehicleBlock.findFirstOrThrow({ where: { vehicleId: vehicleA.id } });
+    const blockB = await prisma.vehicleBlock.findFirstOrThrow({ where: { vehicleId: vehicleB.id } });
+    expect(blockA.blockType).toBe("HOLD");
+    expect(blockB.blockType).toBe("HOLD");
+    expect(blockA.quoteId).toBe(withCustomer.quoteId);
+    expect(blockB.quoteId).toBe(withoutCustomer.quoteId);
+  });
+
+  it("56. createQuote WITH a customerId still persists it — the old path is unbroken", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createQuote(
+      quoteInput({ vehicleId: vehicle.id, customerId, pickupAt: futureDate("2033-04-10T00:00:00Z"), returnAt: futureDate("2033-04-11T00:00:00Z") })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const stored = await prisma.quote.findUniqueOrThrow({ where: { id: outcome.quoteId } });
+    expect(stored.customerId).toBe(customerId);
+  });
+
+  it("57. attachCustomerToQuote sets the customer on an existing quote", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createQuote(
+      quoteInput({ vehicleId: vehicle.id, customerId: undefined, pickupAt: futureDate("2033-04-15T00:00:00Z"), returnAt: futureDate("2033-04-16T00:00:00Z") })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const updated = await attachCustomerToQuote(outcome.quoteId, customerId);
+    expect(updated.customerId).toBe(customerId);
+
+    const stored = await prisma.quote.findUniqueOrThrow({ where: { id: outcome.quoteId } });
+    expect(stored.customerId).toBe(customerId);
+  });
+
+  it("58. createBooking from a customerless quote succeeds when a customerId is supplied at booking time", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const pickupAt = futureDate("2033-04-20T00:00:00Z");
+    const returnAt = futureDate("2033-04-21T00:00:00Z");
+    const quoteOutcome = await createQuote(quoteInput({ vehicleId: vehicle.id, customerId: undefined, pickupAt, returnAt }));
+    expect(quoteOutcome.ok).toBe(true);
+    if (!quoteOutcome.ok) throw new Error("expected quote success");
+
+    const bookingOutcome = await createBooking(
+      bookingInput({ vehicleId: vehicle.id, pickupAt, returnAt, quoteId: quoteOutcome.quoteId })
+    );
+    expect(bookingOutcome.ok).toBe(true);
+    if (!bookingOutcome.ok) throw new Error("expected booking success");
+
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: bookingOutcome.bookingId } });
+    expect(booking.customerId).toBe(customerId);
+  });
+});
+
+describe("transaction composition", () => {
+  it("59. findOrCreateCustomer and createBooking inside ONE external transaction both commit", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const email = `tx-commit-${Date.now()}@example.com`;
+    const pickupAt = futureDate("2036-01-01T00:00:00Z");
+    const returnAt = futureDate("2036-01-02T00:00:00Z");
+
+    const outcome = await prisma.$transaction(async (tx) => {
+      const cust = await findOrCreateCustomer({ email, name: "Tx Commit" }, tx);
+      return createBooking(bookingInput({ vehicleId: vehicle.id, customerId: cust.id, pickupAt, returnAt }), { tx });
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const cust = await prisma.customer.findUniqueOrThrow({ where: { email } });
+    extraCustomerIds.push(cust.id);
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: outcome.bookingId } });
+    expect(booking.customerId).toBe(cust.id);
+  });
+
+  it("60. THE POINT OF THIS CHANGE: findOrCreateCustomer succeeds then createBooking fails inside one transaction — zero customer rows, zero booking rows remain", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const email = `tx-rollback-${Date.now()}@example.com`;
+    const pickupAt = futureDate("2036-02-01T00:00:00Z");
+    const returnAt = futureDate("2036-02-02T00:00:00Z");
+
+    // A real failure, not a simulated one: the vehicle-block insert step
+    // itself throws, mid-transaction.
+    vi.spyOn(bookingSteps, "insertVehicleBlock").mockRejectedValueOnce(new Error("INJECTED_FAILURE_60"));
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const cust = await findOrCreateCustomer({ email, name: "Tx Rollback" }, tx);
+        const outcome = await createBooking(bookingInput({ vehicleId: vehicle.id, customerId: cust.id, pickupAt, returnAt }), { tx });
+        if (!outcome.ok) throw new Error("booking rejected: " + outcome.reason);
+        return outcome;
+      })
+    ).rejects.toThrow("INJECTED_FAILURE_60");
+
+    const customerCount = await prisma.customer.count({ where: { email } });
+    const bookingCount = await prisma.booking.count({ where: { vehicleId: vehicle.id } });
+    expect(customerCount).toBe(0);
+    expect(bookingCount).toBe(0);
+  });
+
+  it("61. createBooking called with NO transaction client still works exactly as before", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(
+      bookingInput({ vehicleId: vehicle.id, pickupAt: futureDate("2036-03-01T00:00:00Z"), returnAt: futureDate("2036-03-02T00:00:00Z") })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const bookings = await prisma.booking.findMany({ where: { vehicleId: vehicle.id } });
+    expect(bookings).toHaveLength(1);
+  });
+});
+
+describe("injectable clock", () => {
+  it("62. createBooking with a frozen `now` in the past accepts a licence that is expired relative to the real clock but valid relative to the frozen one", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const frozenNow = new Date("2026-01-01T00:00:00Z");
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2026-01-02T00:00:00Z"),
+        returnAt: futureDate("2026-01-03T00:00:00Z"),
+        // Already expired relative to the real system clock, but still
+        // valid relative to frozenNow below.
+        driverLicenceExpiry: futureDate("2026-05-01T00:00:00Z"),
+      }),
+      { now: frozenNow }
+    );
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("63. createBooking with a frozen `now` in the future rejects a licence that is valid relative to the real clock — LICENCE_EXPIRED", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const frozenNow = new Date("2030-01-01T00:00:00Z");
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2027-01-01T00:00:00Z"),
+        returnAt: futureDate("2027-01-02T00:00:00Z"),
+        // Valid relative to the real system clock, but already expired
+        // relative to frozenNow below.
+        driverLicenceExpiry: futureDate("2028-01-01T00:00:00Z"),
+      }),
+      { now: frozenNow }
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected rejection");
+    expect(outcome.reason).toBe("LICENCE_EXPIRED");
+  });
+
+  it("64. the young-driver surcharge is computed against the passed-in `now`, not the system clock", async () => {
+    const vehicleBefore = await createVehicle({ currentLocationId: locNoBuffer });
+    const vehicleAfter = await createVehicle({ currentLocationId: locNoBuffer });
+    // Turns 25 on 2026-06-15. youngDriverMaxAge is 24 (seeded settings), so
+    // the day before the birthday the driver is still 24 (surcharge
+    // applies) and the day after they are 25 (surcharge no longer applies).
+    const dob = new Date("2001-06-15T00:00:00Z");
+    const nowBeforeBirthday = new Date("2026-06-14T00:00:00Z");
+    const nowAfterBirthday = new Date("2026-06-16T00:00:00Z");
+    const pickupAt = futureDate("2036-07-01T00:00:00Z");
+    const returnAt = futureDate("2036-07-02T00:00:00Z");
+
+    const before = await createBooking(
+      bookingInput({ vehicleId: vehicleBefore.id, pickupAt, returnAt, driverDateOfBirth: dob }),
+      { now: nowBeforeBirthday }
+    );
+    const after = await createBooking(
+      bookingInput({ vehicleId: vehicleAfter.id, pickupAt, returnAt, driverDateOfBirth: dob }),
+      { now: nowAfterBirthday }
+    );
+    expect(before.ok).toBe(true);
+    expect(after.ok).toBe(true);
+    if (!before.ok || !after.ok) throw new Error("expected success");
+
+    const beforeLineItems = await prisma.bookingLineItem.findMany({ where: { bookingId: before.bookingId } });
+    const afterLineItems = await prisma.bookingLineItem.findMany({ where: { bookingId: after.bookingId } });
+    expect(beforeLineItems.some((li) => li.type === "SURCHARGE")).toBe(true);
+    expect(afterLineItems.some((li) => li.type === "SURCHARGE")).toBe(false);
+  });
+});
+
+describe("regression on nullability", () => {
+  it("65. Booking.customerId remains required — attempting to create a booking without one is rejected", () => {
+    const input = bookingInput({ vehicleId: "00000000-0000-0000-0000-000000000000" }) as Record<string, unknown>;
+    delete input.customerId;
+    const result = createBookingInputSchema.safeParse(input);
+    expect(result.success).toBe(false);
   });
 });

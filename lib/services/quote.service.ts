@@ -108,7 +108,10 @@ export function computeQuoteExpiresAt(createdAt: Date): Date {
 }
 
 export interface CreateQuoteInput {
-  customerId: string;
+  // Optional: a quote is a hold on a vehicle, not a customer commitment —
+  // identity may not exist yet at the moment the customer clicks Select.
+  // Attach it later via attachCustomerToQuote().
+  customerId?: string;
   vehicleId: string;
   pickupLocationId: string;
   dropoffLocationId: string;
@@ -121,8 +124,7 @@ export type CreateQuoteOutcome =
   | { ok: true; quoteId: string; expiresAt: Date; result: QuoteResult }
   | { ok: false; reason: PriceRequestRejectionReason | "VEHICLE_UNAVAILABLE" };
 
-export async function createQuote(input: CreateQuoteInput): Promise<CreateQuoteOutcome> {
-  const now = new Date();
+export async function createQuote(input: CreateQuoteInput, now: Date = new Date()): Promise<CreateQuoteOutcome> {
   const expiresAt = computeQuoteExpiresAt(now);
 
   try {
@@ -143,7 +145,7 @@ export async function createQuote(input: CreateQuoteInput): Promise<CreateQuoteO
 
       const created = await tx.quote.create({
         data: {
-          customerId: input.customerId,
+          customerId: input.customerId ?? null,
           vehicleId: input.vehicleId,
           pickupLocationId: input.pickupLocationId,
           dropoffLocationId: input.dropoffLocationId,
@@ -189,6 +191,14 @@ export async function createQuote(input: CreateQuoteInput): Promise<CreateQuoteO
     }
     throw err;
   }
+}
+
+// Attaches a customer to an existing quote once identity becomes known —
+// e.g. after guest checkout collects an email. Does not touch the HOLD
+// block, pricing, or expiresAt; those are established at createQuote time
+// and are independent of whether a customer is attached.
+export async function attachCustomerToQuote(quoteId: string, customerId: string, tx: DbClient = prisma) {
+  return tx.quote.update({ where: { id: quoteId }, data: { customerId } });
 }
 
 export async function getQuote(id: string) {

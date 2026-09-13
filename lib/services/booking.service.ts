@@ -91,13 +91,26 @@ async function nextReference(tx: Prisma.TransactionClient, now: Date): Promise<s
   return `BK-${year}-${String(nextNumber).padStart(4, "0")}`;
 }
 
-export async function createBooking(rawInput: unknown): Promise<CreateBookingOutcome> {
+export interface CreateBookingOptions {
+  // No client passed: createBooking opens and owns its own transaction, as
+  // before. Client passed: it joins the caller's transaction rather than
+  // opening a nested one — Prisma's nested $transaction does not behave as
+  // most people expect, so the joining path is explicit here, not accidental.
+  // This is what lets findOrCreateCustomer + createBooking commit atomically.
+  tx?: Prisma.TransactionClient;
+  // Defaults to the real clock. Passed through to priceRequest and
+  // validateDriverLicence so licence-expiry/age logic is testable with a
+  // frozen clock instead of only the real one.
+  now?: Date;
+}
+
+export async function createBooking(rawInput: unknown, options?: CreateBookingOptions): Promise<CreateBookingOutcome> {
   const parsed = createBookingInputSchema.safeParse(rawInput);
   if (!parsed.success) {
     return { ok: false, reason: "VALIDATION_ERROR" };
   }
   const input = parsed.data;
-  const now = new Date();
+  const now = options?.now ?? new Date();
 
   const licenceCheck = validateDriverLicence(input, now);
   if (!licenceCheck.ok) {
@@ -111,101 +124,106 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
     }
   }
 
-  try {
-    return await prisma.$transaction(async (tx) => {
-      // Price authority: always re-computed here from current vehicle
-      // rates. The caller's quoteId (if any) is used only for the expiry
-      // check above — its stored price is never read or trusted.
-      const priced = await priceRequest(tx, {
-        vehicleId: input.vehicleId,
-        pickupLocationId: input.pickupLocationId,
-        returnLocationId: input.dropoffLocationId,
-        pickupAt: input.pickupAt,
-        returnAt: input.returnAt,
-        driverDateOfBirth: input.driverDateOfBirth,
-        now,
-      });
-
-      if (!priced.ok) {
-        const reason: BookingRejectionReason = priced.reason === "VEHICLE_NOT_PRICED" ? "PRICE_UNAVAILABLE" : priced.reason;
-        return { ok: false, reason };
-      }
-
-      const reference = await nextReference(tx, now);
-
-      const booking = await bookingSteps.insertBooking(tx, {
-        reference,
-        customerId: input.customerId,
-        vehicleId: input.vehicleId,
-        pickupLocationId: input.pickupLocationId,
-        dropoffLocationId: input.dropoffLocationId,
-        pickupAt: input.pickupAt,
-        returnAt: input.returnAt,
-        subtotalAmount: priced.subtotalAmount,
-        taxAmount: priced.taxAmount,
-        securityDeposit: priced.securityDeposit,
-        rentalDays: priced.rentalDays,
-        totalAmount: priced.totalAmount,
-        currency: priced.currency,
-        status: BookingStatus.PENDING,
-        paymentStatus: PaymentStatus.UNPAID,
-        source: input.source ?? "WEBSITE",
-        driverFullName: input.driverFullName,
-        driverPhone: input.driverPhone,
-        driverEmail: input.driverEmail,
-        driverLicenceCountry: input.driverLicenceCountry,
-        driverLicenceExpiry: input.driverLicenceExpiry,
-        // Encrypted here, at the service layer, so the call site is
-        // greppable — see lib/crypto/field-encryption.ts. Never stored or
-        // logged in plaintext.
-        driverLicenceNumber: encryptField(input.driverLicenceNumber),
-      });
-
-      await bookingSteps.insertLineItems(
-        tx,
-        priced.lineItems.map((li) => ({
-          bookingId: booking.id,
-          type: li.type,
-          description: li.description,
-          quantity: li.quantity,
-          unitAmount: li.unitAmount,
-          totalAmount: li.totalAmount,
-          isTaxable: li.isTaxable,
-          sortOrder: li.sortOrder,
-          currency: priced.currency,
-        }))
-      );
-
-      // If this booking is converting a live quote hold, reuse that block
-      // row rather than inserting a second one — the exclusion constraint
-      // would reject its own customer's hold. Otherwise (no quote, or the
-      // hold already expired/was released) insert fresh: if the vehicle is
-      // already blocked for this window, Postgres raises 23P01 here and the
-      // catch below turns it into VEHICLE_UNAVAILABLE. Everything written
-      // above in this transaction (booking, line items) rolls back with it.
-      let converted = false;
-      if (input.quoteId) {
-        const updateResult = await bookingSteps.convertHoldToBooking(tx, input.quoteId, booking.id);
-        converted = updateResult.count > 0;
-      }
-      if (!converted) {
-        const { start, end } = await computeBlockWindow(tx, input.pickupLocationId, input.pickupAt, input.returnAt);
-        await bookingSteps.insertVehicleBlock(tx, input.vehicleId, start, end, booking.id);
-      }
-
-      const result: CreateBookingResult = {
-        ok: true,
-        bookingId: booking.id,
-        reference,
-        totalAmount: booking.totalAmount,
-        subtotalAmount: booking.subtotalAmount,
-        taxAmount: booking.taxAmount,
-        securityDeposit: booking.securityDeposit,
-        currency: booking.currency,
-        rentalDays: booking.rentalDays,
-      };
-      return result;
+  const runInTransaction = async (tx: Prisma.TransactionClient): Promise<CreateBookingOutcome> => {
+    // Price authority: always re-computed here from current vehicle
+    // rates. The caller's quoteId (if any) is used only for the expiry
+    // check above — its stored price is never read or trusted.
+    const priced = await priceRequest(tx, {
+      vehicleId: input.vehicleId,
+      pickupLocationId: input.pickupLocationId,
+      returnLocationId: input.dropoffLocationId,
+      pickupAt: input.pickupAt,
+      returnAt: input.returnAt,
+      driverDateOfBirth: input.driverDateOfBirth,
+      now,
     });
+
+    if (!priced.ok) {
+      const reason: BookingRejectionReason = priced.reason === "VEHICLE_NOT_PRICED" ? "PRICE_UNAVAILABLE" : priced.reason;
+      return { ok: false, reason };
+    }
+
+    const reference = await nextReference(tx, now);
+
+    const booking = await bookingSteps.insertBooking(tx, {
+      reference,
+      customerId: input.customerId,
+      vehicleId: input.vehicleId,
+      pickupLocationId: input.pickupLocationId,
+      dropoffLocationId: input.dropoffLocationId,
+      pickupAt: input.pickupAt,
+      returnAt: input.returnAt,
+      subtotalAmount: priced.subtotalAmount,
+      taxAmount: priced.taxAmount,
+      securityDeposit: priced.securityDeposit,
+      rentalDays: priced.rentalDays,
+      totalAmount: priced.totalAmount,
+      currency: priced.currency,
+      status: BookingStatus.PENDING,
+      paymentStatus: PaymentStatus.UNPAID,
+      source: input.source ?? "WEBSITE",
+      driverFullName: input.driverFullName,
+      driverPhone: input.driverPhone,
+      driverEmail: input.driverEmail,
+      driverLicenceCountry: input.driverLicenceCountry,
+      driverLicenceExpiry: input.driverLicenceExpiry,
+      // Encrypted here, at the service layer, so the call site is
+      // greppable — see lib/crypto/field-encryption.ts. Never stored or
+      // logged in plaintext.
+      driverLicenceNumber: encryptField(input.driverLicenceNumber),
+    });
+
+    await bookingSteps.insertLineItems(
+      tx,
+      priced.lineItems.map((li) => ({
+        bookingId: booking.id,
+        type: li.type,
+        description: li.description,
+        quantity: li.quantity,
+        unitAmount: li.unitAmount,
+        totalAmount: li.totalAmount,
+        isTaxable: li.isTaxable,
+        sortOrder: li.sortOrder,
+        currency: priced.currency,
+      }))
+    );
+
+    // If this booking is converting a live quote hold, reuse that block
+    // row rather than inserting a second one — the exclusion constraint
+    // would reject its own customer's hold. Otherwise (no quote, or the
+    // hold already expired/was released) insert fresh: if the vehicle is
+    // already blocked for this window, Postgres raises 23P01 here and the
+    // catch below turns it into VEHICLE_UNAVAILABLE. Everything written
+    // above in this transaction (booking, line items) rolls back with it.
+    let converted = false;
+    if (input.quoteId) {
+      const updateResult = await bookingSteps.convertHoldToBooking(tx, input.quoteId, booking.id);
+      converted = updateResult.count > 0;
+    }
+    if (!converted) {
+      const { start, end } = await computeBlockWindow(tx, input.pickupLocationId, input.pickupAt, input.returnAt);
+      await bookingSteps.insertVehicleBlock(tx, input.vehicleId, start, end, booking.id);
+    }
+
+    const result: CreateBookingResult = {
+      ok: true,
+      bookingId: booking.id,
+      reference,
+      totalAmount: booking.totalAmount,
+      subtotalAmount: booking.subtotalAmount,
+      taxAmount: booking.taxAmount,
+      securityDeposit: booking.securityDeposit,
+      currency: booking.currency,
+      rentalDays: booking.rentalDays,
+    };
+    return result;
+  };
+
+  try {
+    if (options?.tx) {
+      return await runInTransaction(options.tx);
+    }
+    return await prisma.$transaction(runInTransaction);
   } catch (err) {
     if (isExclusionViolation(err)) {
       return { ok: false, reason: "VEHICLE_UNAVAILABLE" };
