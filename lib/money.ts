@@ -52,6 +52,21 @@ export function applyBasisPoints(amount: Money, bps: number): Money {
   return roundDivision(amount * BigInt(bps), TEN_THOUSAND);
 }
 
+// Server-side only: converts a decimal string as typed into an admin form
+// (e.g. "1500" or "1500.50") into minor units. The browser never parses
+// money — this is the single place a rate/deposit form field becomes a
+// BigInt, called from app/actions/fleet.ts. Returns null on anything that
+// isn't a plain non-negative decimal with at most 2 fraction digits.
+export function parseMoneyInput(raw: string): Money | null {
+  const trimmed = raw.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) {
+    return null;
+  }
+  const [wholePart, fractionPart = ""] = trimmed.split(".");
+  const minor = fractionPart.padEnd(2, "0");
+  return BigInt(wholePart) * HUNDRED + BigInt(minor);
+}
+
 // Render-only. Never used to feed a number back into arithmetic.
 export function formatMoney(amount: Money, currency: string): string {
   const negative = amount < ZERO;
