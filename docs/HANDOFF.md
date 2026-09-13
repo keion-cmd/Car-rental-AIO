@@ -2,7 +2,7 @@
 
 ## Current phase
 
-P1-P2 complete. Prior phase P1-P1-R4 committed at `75c839171a2e6c74611913eddcb862b926688e0`.
+P3-P0 complete (driver licence capture schema). Prior phase committed at `c972df1`.
 
 ## Database
 
@@ -18,6 +18,11 @@ on any new machine. Required variable **names** (values are never stored here):
 - `DIRECT_URL` — points at the local embedded Postgres instance
 - `REMOTE_DATABASE_URL` — holds the Supabase pooled connection string; **unused for now**
 - `REMOTE_DIRECT_URL` — holds the Supabase direct connection string; **unused for now**
+- `FIELD_ENCRYPTION_KEY` — 32-byte hex-encoded AES-256-GCM key used by
+  `lib/crypto/field-encryption.ts` to encrypt `Booking.driverLicenceNumber` at rest.
+  **Losing this key makes every stored licence number permanently unreadable** — there is no
+  recovery path. Generate a new one with `crypto.randomBytes(32).toString('hex')`; never
+  commit it.
 
 ### Permanent rule
 
@@ -40,6 +45,29 @@ Enums: `VehicleTransmission`, `VehicleFuelType`, `BookingStatus`, `PaymentStatus
 Tables: `settings`, `users`, `locations`, `location_pairs`, `vehicle_categories`,
 `vehicle_models`, `vehicles`, `vehicle_images`, `customers`, `quotes`, `bookings`,
 `booking_line_items`, `maintenance_records`, `vehicle_blocks`.
+
+## Driver licence capture (P3-P0)
+
+`bookings` carries six required driver-of-record columns, snapshotted at booking time:
+`driver_full_name`, `driver_phone`, `driver_email`, `driver_licence_number`,
+`driver_licence_country`, `driver_licence_expiry`. They live on the booking, not the
+customer, because a licence on the customer record would silently rewrite history for every
+past rental when renewed. `customers` gained an optional `date_of_birth`; `customers.email`
+already had a unique index.
+
+`driver_licence_number` is identity-document data and is encrypted at rest with AES-256-GCM
+(`lib/crypto/field-encryption.ts`, key from `FIELD_ENCRYPTION_KEY` above). Encryption/
+decryption happens explicitly at the service layer in `lib/services/booking.service.ts` —
+never in Prisma middleware — so every read site is greppable:
+`getDriverLicenceNumber(bookingId)` is the only function that decrypts it.
+`getBookingByReference` omits the column entirely. Because the IV is random per encryption,
+the column is not searchable or joinable; licence numbers are only ever looked up by booking
+id, so this is acceptable.
+
+`lib/services/customer.service.ts` adds `findOrCreateCustomer`, deduping on a
+trimmed/lowercased email via an atomic `upsert` (safe under concurrent callers with the same
+email). It never overwrites a non-null `name`/`phone`/`dateOfBirth` and never updates email.
+It is not yet wired into `createBooking` — that lands with the booking flow (P3-P3).
 
 ## The `vehicle_blocks` exclusion constraint
 

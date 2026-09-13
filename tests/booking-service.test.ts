@@ -3,15 +3,19 @@ import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { isVehicleAvailable, findAvailableVehicles } from "../lib/services/availability.service";
-import { createBooking, cancelBooking, getBookingByReference, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
+import { createBooking, cancelBooking, getBookingByReference, getDriverLicenceNumber, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
 import { createQuote, releaseExpiredHolds, type CreateQuoteInput } from "../lib/services/quote.service";
 import { quote, type QuoteSettingsInput } from "../lib/pricing/quote";
+import { encryptField, decryptField } from "../lib/crypto/field-encryption";
+import { findOrCreateCustomer } from "../lib/services/customer.service";
+import { createBookingInputSchema } from "../lib/validation/booking";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
 
 const prisma = new PrismaClient();
 
 const ADULT_DOB = new Date("1990-01-01T00:00:00Z");
+const FAR_FUTURE_LICENCE_EXPIRY = new Date("2099-01-01T00:00:00Z");
 
 let categoryId: string;
 let modelId: string;
@@ -25,6 +29,7 @@ let locTurnaround: string; // prep=0, turnaround=90 — buffer test
 let locOther: string; // a second pickup location, for the location-filter test
 
 const vehicleIds: string[] = [];
+const extraCustomerIds: string[] = [];
 
 function futureDate(iso: string): Date {
   return new Date(iso);
@@ -75,6 +80,12 @@ function bookingInput(overrides: Record<string, unknown> = {}) {
     pickupAt: futureDate("2031-01-01T00:00:00Z"),
     returnAt: futureDate("2031-01-02T00:00:00Z"),
     driverDateOfBirth: ADULT_DOB,
+    driverFullName: "Jane Driver",
+    driverPhone: "+639171234567",
+    driverEmail: "jane.driver@example.com",
+    driverLicenceNumber: "N01-23-456789",
+    driverLicenceCountry: "PH",
+    driverLicenceExpiry: FAR_FUTURE_LICENCE_EXPIRY,
     ...overrides,
   };
 }
@@ -136,6 +147,7 @@ afterAll(async () => {
   await prisma.quote.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.vehicle.deleteMany({ where: { id: { in: vehicleIds } } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
+  await prisma.customer.deleteMany({ where: { id: { in: extraCustomerIds } } });
   await prisma.vehicleModel.deleteMany({ where: { id: modelId } });
   await prisma.location.deleteMany({ where: { id: { in: [locNoBuffer, locTurnaround, locOther] } } });
   await prisma.$disconnect();
@@ -531,6 +543,12 @@ describe("reference persistence", () => {
           pickupAt: futureDate("2032-04-12T00:00:00Z"),
           returnAt: futureDate("2032-04-13T00:00:00Z"),
           totalAmount: BigInt(1000),
+          driverFullName: "Jane Driver",
+          driverPhone: "+639171234567",
+          driverEmail: "jane.driver@example.com",
+          driverLicenceNumber: "N01-23-456789",
+          driverLicenceCountry: "PH",
+          driverLicenceExpiry: FAR_FUTURE_LICENCE_EXPIRY,
         },
       })
     ).rejects.toThrow();
@@ -749,4 +767,210 @@ describe("concurrency re-verification after block-insertion changes", () => {
     },
     60_000
   );
+});
+
+describe("field encryption", () => {
+  it("40. encryptField then decryptField round-trips exactly", () => {
+    const plaintext = "N01-23-456789";
+    const ciphertext = encryptField(plaintext);
+    expect(decryptField(ciphertext)).toBe(plaintext);
+  });
+
+  it("41. encrypting the same plaintext twice yields different ciphertext", () => {
+    const plaintext = "N01-23-456789";
+    const first = encryptField(plaintext);
+    const second = encryptField(plaintext);
+    expect(first).not.toBe(second);
+    expect(decryptField(first)).toBe(plaintext);
+    expect(decryptField(second)).toBe(plaintext);
+  });
+
+  it("42. tampering with the ciphertext causes decryption to FAIL, not return garbage", () => {
+    const ciphertext = encryptField("N01-23-456789");
+    const raw = Buffer.from(ciphertext, "base64");
+    raw[raw.length - 1] ^= 0xff;
+    const tampered = raw.toString("base64");
+    expect(() => decryptField(tampered)).toThrow();
+  });
+
+  it("43. the value stored in the database column is NOT the plaintext licence number", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const licenceNumber = "N01-99-STORED-RAW-CHECK";
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-01-01T00:00:00Z"),
+        returnAt: futureDate("2034-01-02T00:00:00Z"),
+        driverLicenceNumber: licenceNumber,
+      })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ driver_licence_number: string }>>(
+      `SELECT driver_licence_number FROM bookings WHERE id = $1::uuid`,
+      outcome.bookingId
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].driver_licence_number).not.toContain(licenceNumber);
+  });
+});
+
+describe("customer dedup", () => {
+  it("44. findOrCreateCustomer with the same email in different case and with whitespace returns ONE customer", async () => {
+    const base = `dedup-${Date.now()}@example.com`;
+    const first = await findOrCreateCustomer({ email: `  ${base.toUpperCase()}  `, name: "Dedup Person" });
+    extraCustomerIds.push(first.id);
+    const second = await findOrCreateCustomer({ email: base, name: "Dedup Person" });
+
+    expect(second.id).toBe(first.id);
+    const count = await prisma.customer.count({ where: { email: base.toLowerCase() } });
+    expect(count).toBe(1);
+  });
+
+  it("45. different emails create different customers", async () => {
+    const a = await findOrCreateCustomer({ email: `diff-a-${Date.now()}@example.com`, name: "A" });
+    const b = await findOrCreateCustomer({ email: `diff-b-${Date.now()}@example.com`, name: "B" });
+    extraCustomerIds.push(a.id, b.id);
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it("46. CONCURRENCY: 20 parallel findOrCreateCustomer calls with the same email create exactly ONE customer row", async () => {
+    const email = `concurrent-${Date.now()}@example.com`;
+    const attempts = Array.from({ length: 20 }, () => findOrCreateCustomer({ email, name: "Concurrent Person" }));
+    const results = await Promise.all(attempts);
+
+    const ids = new Set(results.map((c) => c.id));
+    expect(ids.size).toBe(1);
+    extraCustomerIds.push(...Array.from(ids));
+
+    const count = await prisma.customer.count({ where: { email: email.toLowerCase() } });
+    expect(count).toBe(1);
+  });
+});
+
+describe("licence validation", () => {
+  it("47. a licence expiring before `now` is rejected with LICENCE_EXPIRED, no booking created", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-02-01T00:00:00Z"),
+        returnAt: futureDate("2034-02-02T00:00:00Z"),
+        driverLicenceExpiry: new Date("2020-01-01T00:00:00Z"),
+      })
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected rejection");
+    expect(outcome.reason).toBe("LICENCE_EXPIRED");
+
+    const bookings = await prisma.booking.findMany({ where: { vehicleId: vehicle.id } });
+    expect(bookings).toHaveLength(0);
+  });
+
+  it("48. a licence expiring after `now` but before returnAt is rejected with LICENCE_EXPIRES_DURING_RENTAL", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-02-05T00:00:00Z"),
+        returnAt: futureDate("2034-02-06T00:00:00Z"),
+        driverLicenceExpiry: futureDate("2028-01-01T00:00:00Z"),
+      })
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected rejection");
+    expect(outcome.reason).toBe("LICENCE_EXPIRES_DURING_RENTAL");
+
+    const bookings = await prisma.booking.findMany({ where: { vehicleId: vehicle.id } });
+    expect(bookings).toHaveLength(0);
+  });
+
+  it("49. a licence valid through returnAt is accepted", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const returnAt = futureDate("2034-02-10T00:00:00Z");
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-02-09T00:00:00Z"),
+        returnAt,
+        driverLicenceExpiry: returnAt,
+      })
+    );
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("50. a licence country that is not 2 uppercase letters is rejected by the schema", () => {
+    const result = createBookingInputSchema.safeParse({
+      ...bookingInput({ vehicleId: "00000000-0000-0000-0000-000000000000" }),
+      driverLicenceCountry: "ph",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("driver field persistence", () => {
+  it("51. createBooking persists all six driver fields; the five non-encrypted ones read back exactly", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const driverFields = {
+      driverFullName: "Persist Driver",
+      driverPhone: "+639170000001",
+      driverEmail: "persist.driver@example.com",
+      driverLicenceCountry: "PH",
+      driverLicenceExpiry: futureDate("2040-01-01T00:00:00Z"),
+      driverLicenceNumber: "N01-51-PERSIST",
+    };
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-03-01T00:00:00Z"),
+        returnAt: futureDate("2034-03-02T00:00:00Z"),
+        ...driverFields,
+      })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { id: outcome.bookingId } });
+    expect(booking.driverFullName).toBe(driverFields.driverFullName);
+    expect(booking.driverPhone).toBe(driverFields.driverPhone);
+    expect(booking.driverEmail).toBe(driverFields.driverEmail);
+    expect(booking.driverLicenceCountry).toBe(driverFields.driverLicenceCountry);
+    expect(booking.driverLicenceExpiry.getTime()).toBe(driverFields.driverLicenceExpiry.getTime());
+  });
+
+  it("52. getDriverLicenceNumber returns the original plaintext", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const licenceNumber = "N01-52-DECRYPT-CHECK";
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-03-05T00:00:00Z"),
+        returnAt: futureDate("2034-03-06T00:00:00Z"),
+        driverLicenceNumber: licenceNumber,
+      })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const decrypted = await getDriverLicenceNumber(outcome.bookingId);
+    expect(decrypted).toBe(licenceNumber);
+  });
+
+  it("53. getBookingByReference does NOT include the licence number in its result", async () => {
+    const vehicle = await createVehicle({ currentLocationId: locNoBuffer });
+    const outcome = await createBooking(
+      bookingInput({
+        vehicleId: vehicle.id,
+        pickupAt: futureDate("2034-03-10T00:00:00Z"),
+        returnAt: futureDate("2034-03-11T00:00:00Z"),
+      })
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected success");
+
+    const found = await getBookingByReference(outcome.reference);
+    expect(found).not.toBeNull();
+    expect(found).not.toHaveProperty("driverLicenceNumber");
+  });
 });

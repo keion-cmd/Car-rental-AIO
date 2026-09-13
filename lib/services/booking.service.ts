@@ -1,7 +1,8 @@
 import { PrismaClient, Prisma, BookingStatus, PaymentStatus } from "@prisma/client";
 import { priceRequest, getQuote, type PriceRequestRejectionReason } from "./quote.service";
 import { computeBlockWindow } from "./availability.service";
-import { createBookingInputSchema } from "../validation/booking";
+import { createBookingInputSchema, validateDriverLicence } from "../validation/booking";
+import { encryptField, decryptField } from "../crypto/field-encryption";
 
 // This is the ONLY function that creates a booking. It re-prices
 // server-side inside a single transaction, writes the booking, its line
@@ -17,6 +18,8 @@ export type BookingRejectionReason =
   | "VEHICLE_UNAVAILABLE"
   | "QUOTE_EXPIRED"
   | "PRICE_UNAVAILABLE"
+  | "LICENCE_EXPIRED"
+  | "LICENCE_EXPIRES_DURING_RENTAL"
   | PriceRequestRejectionReason;
 
 export interface CreateBookingResult {
@@ -96,6 +99,11 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
   const input = parsed.data;
   const now = new Date();
 
+  const licenceCheck = validateDriverLicence(input, now);
+  if (!licenceCheck.ok) {
+    return { ok: false, reason: licenceCheck.reason };
+  }
+
   if (input.quoteId) {
     const quoteRecord = await getQuote(input.quoteId);
     if (!quoteRecord || quoteRecord.isExpired) {
@@ -142,6 +150,15 @@ export async function createBooking(rawInput: unknown): Promise<CreateBookingOut
         status: BookingStatus.PENDING,
         paymentStatus: PaymentStatus.UNPAID,
         source: input.source ?? "WEBSITE",
+        driverFullName: input.driverFullName,
+        driverPhone: input.driverPhone,
+        driverEmail: input.driverEmail,
+        driverLicenceCountry: input.driverLicenceCountry,
+        driverLicenceExpiry: input.driverLicenceExpiry,
+        // Encrypted here, at the service layer, so the call site is
+        // greppable — see lib/crypto/field-encryption.ts. Never stored or
+        // logged in plaintext.
+        driverLicenceNumber: encryptField(input.driverLicenceNumber),
       });
 
       await bookingSteps.insertLineItems(
@@ -223,5 +240,19 @@ export async function cancelBooking(bookingId: string, reason: string): Promise<
 }
 
 export async function getBookingByReference(reference: string) {
-  return prisma.booking.findUnique({ where: { reference } });
+  // driverLicenceNumber is identity-document data — never returned by a
+  // public-facing read path, encrypted or not. getDriverLicenceNumber below
+  // is the only function that reads it.
+  return prisma.booking.findUnique({ where: { reference }, omit: { driverLicenceNumber: true } });
+}
+
+// The ONLY function that decrypts driverLicenceNumber. Kept separate from
+// every other read path so every call site that needs the plaintext is
+// greppable and auditable.
+export async function getDriverLicenceNumber(bookingId: string): Promise<string> {
+  const booking = await prisma.booking.findUniqueOrThrow({
+    where: { id: bookingId },
+    select: { driverLicenceNumber: true },
+  });
+  return decryptField(booking.driverLicenceNumber);
 }
