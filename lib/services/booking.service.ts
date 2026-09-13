@@ -3,6 +3,7 @@ import { priceRequest, getQuote, type PriceRequestRejectionReason } from "./quot
 import { computeBlockWindow } from "./availability.service";
 import { createBookingInputSchema, validateDriverLicence } from "../validation/booking";
 import { encryptField, decryptField } from "../crypto/field-encryption";
+import { multiplyByQty, applyBasisPoints } from "../money";
 
 // This is the ONLY function that creates a booking. It re-prices
 // server-side inside a single transaction, writes the booking, its line
@@ -255,6 +256,335 @@ export async function cancelBooking(bookingId: string, reason: string): Promise<
 
     return { ok: true };
   });
+}
+
+// ==================== COUNTER CHECK-OUT / CHECK-IN (P5-P2) ====================
+//
+// There is no Vehicle.odometer column — that field is on the pre-authorised
+// list for Booking only, not Vehicle. The vehicle's "current" reading is
+// derived here from its own most recent checked-out/checked-in booking
+// instead of a denormalized duplicate column. A vehicle that has never been
+// checked out reads as 0.
+export async function getVehicleCurrentOdometer(db: Prisma.TransactionClient | PrismaClient, vehicleId: string): Promise<number> {
+  const latest = await db.booking.findFirst({
+    where: { vehicleId, checkedOutAt: { not: null } },
+    orderBy: { checkedOutAt: "desc" },
+    select: { status: true, odometerOut: true, odometerIn: true },
+  });
+  if (!latest) return 0;
+  if (latest.status === "COMPLETED") return latest.odometerIn ?? latest.odometerOut ?? 0;
+  return latest.odometerOut ?? 0;
+}
+
+export type CheckOutRejectionReason = "NOT_CONFIRMED" | "ALREADY_CHECKED_OUT" | "ODOMETER_BELOW_VEHICLE_READING";
+
+export interface CheckOutInput {
+  odometerOut: number;
+  fuelOut: number; // eighths of a tank, 0-8
+  staffUserId: string;
+  // Accepted for interface parity with the spec but NOT persisted — Booking
+  // has no notes column, and this schema deliberately does not carry one
+  // (see the internalNotes comment in booking-query.service.ts). Adding one
+  // is outside the pre-authorised schema change for this phase.
+  notes?: string;
+}
+
+export interface CheckOutOptions {
+  tx?: Prisma.TransactionClient;
+  now?: Date;
+}
+
+export type CheckOutOutcome = { ok: true; bookingId: string } | { ok: false; reason: CheckOutRejectionReason };
+
+export async function checkOutBooking(
+  bookingId: string,
+  input: CheckOutInput,
+  options?: CheckOutOptions
+): Promise<CheckOutOutcome> {
+  const now = options?.now ?? new Date();
+
+  const run = async (tx: Prisma.TransactionClient): Promise<CheckOutOutcome> => {
+    const booking = await tx.booking.findUnique({ where: { id: bookingId } });
+    if (!booking || booking.status === "PENDING" || booking.status === "CANCELLED") {
+      return { ok: false, reason: "NOT_CONFIRMED" };
+    }
+    if (booking.status === "ONGOING" || booking.status === "COMPLETED") {
+      return { ok: false, reason: "ALREADY_CHECKED_OUT" };
+    }
+
+    const currentOdometer = await getVehicleCurrentOdometer(tx, booking.vehicleId);
+    if (input.odometerOut < currentOdometer) {
+      return { ok: false, reason: "ODOMETER_BELOW_VEHICLE_READING" };
+    }
+
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.ONGOING,
+        odometerOut: input.odometerOut,
+        fuelOut: input.fuelOut,
+        checkedOutAt: now,
+        checkedOutById: input.staffUserId,
+      },
+    });
+
+    return { ok: true, bookingId };
+  };
+
+  if (options?.tx) {
+    return run(options.tx);
+  }
+  return prisma.$transaction(run);
+}
+
+export type CheckInRejectionReason = "NOT_ONGOING" | "ALREADY_CHECKED_IN" | "ODOMETER_BELOW_CHECKOUT";
+
+export interface CheckInInput {
+  odometerIn: number;
+  fuelIn: number; // eighths of a tank, 0-8
+  staffUserId: string;
+  // Accepted for interface parity with the spec but NOT persisted — see the
+  // matching comment on CheckOutInput.notes.
+  notes?: string;
+  damageNote?: string;
+}
+
+export interface CheckInOptions {
+  tx?: Prisma.TransactionClient;
+  now?: Date;
+}
+
+export interface CheckInLineItemResult {
+  type: "EXTRA_CHARGE";
+  description: string;
+  totalAmount: bigint;
+}
+
+export interface CheckInRatesMissing {
+  // true when the corresponding charge would have applied but no rate
+  // exists in Settings to price it, per instruction: do not invent a rate.
+  lateFee: boolean;
+  fuel: boolean;
+}
+
+export interface CheckInResult {
+  ok: true;
+  bookingId: string;
+  totalAmount: bigint;
+  lineItemsAdded: CheckInLineItemResult[];
+  ratesMissing: CheckInRatesMissing;
+}
+
+export type CheckInOutcome = CheckInResult | { ok: false; reason: CheckInRejectionReason };
+
+// Pure charge computation shared by the real (writing) checkInBooking below
+// and previewCheckIn (read-only, for the confirmation screen the customer
+// sees before anything is charged). Takes plain values, not a tx/db handle,
+// so both call sites can populate it from whichever query shape they have.
+function computeExtraCharges(params: {
+  bookingId: string;
+  currency: string;
+  rentalDays: number;
+  returnAt: Date;
+  odometerOut: number | null;
+  fuelOut: number | null;
+  odometerIn: number;
+  now: Date;
+  billingGraceMinutes: number;
+  includedKmPerDay: number | null;
+  extraKmRate: bigint | null;
+}): { newLineItems: Prisma.BookingLineItemCreateManyInput[]; lineItemsAdded: CheckInLineItemResult[]; ratesMissing: CheckInRatesMissing } {
+  const isLate = params.now.getTime() > params.returnAt.getTime() + params.billingGraceMinutes * 60_000;
+  const fuelShort = false; // computed by caller, which has fuelIn; see below
+
+  const newLineItems: Prisma.BookingLineItemCreateManyInput[] = [];
+  const lineItemsAdded: CheckInLineItemResult[] = [];
+
+  if (params.odometerOut !== null) {
+    const kmDriven = params.odometerIn - params.odometerOut;
+    if (params.includedKmPerDay !== null && params.extraKmRate !== null) {
+      const allowance = params.includedKmPerDay * params.rentalDays;
+      const extraKm = kmDriven - allowance;
+      if (extraKm > 0) {
+        const totalAmount = multiplyByQty(params.extraKmRate, extraKm);
+        const description = `Mileage overage (${extraKm} km beyond allowance)`;
+        newLineItems.push({
+          bookingId: params.bookingId,
+          type: "EXTRA_CHARGE",
+          description,
+          quantity: extraKm,
+          unitAmount: params.extraKmRate,
+          totalAmount,
+          isTaxable: false,
+          sortOrder: 100,
+          currency: params.currency,
+        });
+        lineItemsAdded.push({ type: "EXTRA_CHARGE", description, totalAmount });
+      }
+    }
+  }
+
+  return { newLineItems, lineItemsAdded, ratesMissing: { lateFee: isLate, fuel: fuelShort } };
+}
+
+export interface CheckInPreview {
+  ok: true;
+  lineItemsAdded: CheckInLineItemResult[];
+  ratesMissing: CheckInRatesMissing;
+  projectedSubtotal: bigint;
+  projectedTax: bigint;
+  projectedTotal: bigint;
+}
+
+// Read-only — writes nothing. The check-in screen calls this to render the
+// "clear summary of extra charges" the spec requires before the customer is
+// actually charged; checkInBooking below performs the identical computation
+// again inside its own transaction and is the only function that persists.
+export async function previewCheckIn(
+  bookingId: string,
+  input: { odometerIn: number; fuelIn: number },
+  now: Date = new Date()
+): Promise<CheckInPreview | { ok: false; reason: CheckInRejectionReason }> {
+  const booking = await prisma.booking.findUnique({ where: { id: bookingId }, include: { vehicle: true } });
+  if (!booking || (booking.status !== "ONGOING" && booking.status !== "COMPLETED")) {
+    return { ok: false, reason: "NOT_ONGOING" };
+  }
+  if (booking.status === "COMPLETED") {
+    return { ok: false, reason: "ALREADY_CHECKED_IN" };
+  }
+  if (booking.odometerOut !== null && input.odometerIn < booking.odometerOut) {
+    return { ok: false, reason: "ODOMETER_BELOW_CHECKOUT" };
+  }
+
+  const settings = await prisma.settings.findFirst({ select: { billingGraceMinutes: true, taxRateBps: true } });
+  const { lineItemsAdded, ratesMissing } = computeExtraCharges({
+    bookingId,
+    currency: booking.currency,
+    rentalDays: booking.rentalDays,
+    returnAt: booking.returnAt,
+    odometerOut: booking.odometerOut,
+    fuelOut: booking.fuelOut,
+    odometerIn: input.odometerIn,
+    now,
+    billingGraceMinutes: settings?.billingGraceMinutes ?? 0,
+    includedKmPerDay: booking.vehicle.includedKmPerDay,
+    extraKmRate: booking.vehicle.extraKmRate,
+  });
+  ratesMissing.fuel = booking.fuelOut !== null && input.fuelIn < booking.fuelOut;
+
+  const existingLineItems = await prisma.bookingLineItem.findMany({ where: { bookingId } });
+  const existingSubtotal = existingLineItems.reduce((sum, li) => sum + li.totalAmount, BigInt(0));
+  const existingTaxable = existingLineItems.filter((li) => li.isTaxable).reduce((sum, li) => sum + li.totalAmount, BigInt(0));
+  // newLineItems are all EXTRA_CHARGE / isTaxable: false (see
+  // computeExtraCharges) — lineItemsAdded carries the same totals with a
+  // simple bigint field, avoiding Prisma's widened CreateManyInput type.
+  const addedSubtotal = lineItemsAdded.reduce((sum, li) => sum + li.totalAmount, BigInt(0));
+  const addedTaxable = BigInt(0);
+
+  const projectedSubtotal = existingSubtotal + addedSubtotal;
+  const projectedTax = applyBasisPoints(existingTaxable + addedTaxable, settings?.taxRateBps ?? 0);
+  const projectedTotal = projectedSubtotal + projectedTax;
+
+  return { ok: true, lineItemsAdded, ratesMissing, projectedSubtotal, projectedTax, projectedTotal };
+}
+
+export async function checkInBooking(
+  bookingId: string,
+  input: CheckInInput,
+  options?: CheckInOptions
+): Promise<CheckInOutcome> {
+  const now = options?.now ?? new Date();
+
+  const run = async (tx: Prisma.TransactionClient): Promise<CheckInOutcome> => {
+    const booking = await tx.booking.findUnique({ where: { id: bookingId }, include: { vehicle: true } });
+    if (!booking || (booking.status !== "ONGOING" && booking.status !== "COMPLETED")) {
+      return { ok: false, reason: "NOT_ONGOING" };
+    }
+    if (booking.status === "COMPLETED") {
+      return { ok: false, reason: "ALREADY_CHECKED_IN" };
+    }
+    if (booking.odometerOut !== null && input.odometerIn < booking.odometerOut) {
+      return { ok: false, reason: "ODOMETER_BELOW_CHECKOUT" };
+    }
+
+    const settings = await tx.settings.findFirst({ select: { billingGraceMinutes: true, taxRateBps: true } });
+    const { newLineItems, lineItemsAdded, ratesMissing } = computeExtraCharges({
+      bookingId,
+      currency: booking.currency,
+      rentalDays: booking.rentalDays,
+      returnAt: booking.returnAt,
+      odometerOut: booking.odometerOut,
+      fuelOut: booking.fuelOut,
+      odometerIn: input.odometerIn,
+      now,
+      billingGraceMinutes: settings?.billingGraceMinutes ?? 0,
+      includedKmPerDay: booking.vehicle.includedKmPerDay,
+      extraKmRate: booking.vehicle.extraKmRate,
+    });
+    ratesMissing.fuel = booking.fuelOut !== null && input.fuelIn < booking.fuelOut;
+
+    if (newLineItems.length > 0) {
+      await bookingSteps.insertLineItems(tx, newLineItems);
+    }
+
+    const allLineItems = await tx.bookingLineItem.findMany({ where: { bookingId } });
+    const subtotalAmount = allLineItems.reduce((sum, li) => sum + li.totalAmount, BigInt(0));
+    const taxableAmount = allLineItems.filter((li) => li.isTaxable).reduce((sum, li) => sum + li.totalAmount, BigInt(0));
+    const taxAmount = applyBasisPoints(taxableAmount, settings?.taxRateBps ?? 0);
+    const totalAmount = subtotalAmount + taxAmount;
+
+    await tx.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.COMPLETED,
+        odometerIn: input.odometerIn,
+        fuelIn: input.fuelIn,
+        checkedInAt: now,
+        checkedInById: input.staffUserId,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+      },
+    });
+
+    await tx.vehicle.update({
+      where: { id: booking.vehicleId },
+      data: { currentLocationId: booking.dropoffLocationId },
+    });
+
+    // TRUNCATION — the block that held this rental's window is cut back to
+    // now + turnaround, freeing the vehicle for same-day rebooking on an
+    // early return without silently releasing a later window someone else
+    // already holds. found via bookingId FK, matching cancelBooking's
+    // existing convention — never recompute the period.
+    const { turnaroundMinutes } = await resolveTurnaroundMinutes(tx, booking.pickupLocationId);
+    const truncatedEnd = new Date(now.getTime() + turnaroundMinutes * 60_000);
+    await tx.$executeRaw`
+      UPDATE vehicle_blocks
+      SET period = tstzrange(lower(period), ${truncatedEnd}::timestamptz, '[)')
+      WHERE booking_id = ${bookingId}::uuid
+    `;
+
+    return {
+      ok: true,
+      bookingId,
+      totalAmount,
+      lineItemsAdded,
+      ratesMissing,
+    };
+  };
+
+  if (options?.tx) {
+    return run(options.tx);
+  }
+  return prisma.$transaction(run);
+}
+
+async function resolveTurnaroundMinutes(tx: Prisma.TransactionClient, locationId: string): Promise<{ turnaroundMinutes: number }> {
+  const location = await tx.location.findUnique({ where: { id: locationId }, select: { turnaroundMinutes: true } });
+  if (location) return { turnaroundMinutes: location.turnaroundMinutes };
+  const settings = await tx.settings.findFirst({ select: { defaultTurnaroundMinutes: true } });
+  return { turnaroundMinutes: settings?.defaultTurnaroundMinutes ?? 90 };
 }
 
 export async function getBookingByReference(reference: string) {

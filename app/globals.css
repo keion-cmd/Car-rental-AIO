@@ -261,6 +261,24 @@ footer { background: var(--ink); color: white; padding: 54px 0 22px; }.footer-to
 .admin-dl dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .admin-dl dd { font-size: 13px; margin: 0; }
 
+.admin-primary-button { background: var(--orange); border: 0; border-radius: 22px; color: white; cursor: pointer; font-size: 13px; font-weight: 800; padding: 13px 22px; }
+.admin-primary-button:disabled { cursor: not-allowed; opacity: .55; }
+
+.admin-field { display: block; margin-bottom: 18px; }
+.admin-field label { color: var(--muted); display: block; font-size: 11px; font-weight: 700; letter-spacing: .04em; margin-bottom: 6px; text-transform: uppercase; }
+.admin-field input[type="number"], .admin-field textarea { border: 1px solid var(--line); border-radius: 4px; font-size: 14px; padding: 10px 12px; width: 100%; }
+.admin-field small { color: var(--muted); display: block; font-size: 11px; margin-top: 4px; }
+
+.admin-segmented { display: flex; gap: 4px; }
+.admin-segmented label { align-items: center; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; display: flex; flex: 1; font-size: 12px; font-weight: 700; justify-content: center; padding: 10px 0; }
+.admin-segmented input { accent-color: var(--orange); margin-right: 5px; }
+.admin-segmented input:checked + span { color: var(--orange); }
+
+.admin-charge-summary { background: #f0eee6; border-radius: 4px; margin: 16px 0; padding: 14px 16px; }
+.admin-charge-summary table { font-size: 13px; width: 100%; }
+.admin-charge-summary td { padding: 4px 0; }
+.admin-charge-summary .admin-gap-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
 @media (max-width: 900px) { .search-summary { grid-template-columns: 1fr; } .booking-wizard-body { grid-template-columns: 1fr; } .booking-confirmation-grid { grid-template-columns: 1fr; } .admin-detail-grid { grid-template-columns: 1fr; } }
 
 @media (max-width: 900px) { .nav-links { margin-left: 0; }.phone-link { display: none; }.search-card { grid-template-columns: 150px 1fr; }.search-card form { grid-template-columns: repeat(3, 1fr); row-gap: 16px; }.search-button { min-height: 44px; }.trust-items { gap: 20px; grid-template-columns: repeat(2, 1fr); padding: 25px 0; }.rating { border-left: 0; justify-content: flex-start; padding-left: 0; }.hero-copy { width: 53%; }.hero-visual { opacity: .75; }.story-grid { gap: 45px; } }

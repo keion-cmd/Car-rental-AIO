@@ -328,6 +328,12 @@ export interface BookingDetail extends BookingFlags {
   }>;
   cancellationReason: string | null;
   cancelledAt: Date | null;
+  odometerOut: number | null;
+  odometerIn: number | null;
+  fuelOut: number | null;
+  fuelIn: number | null;
+  checkedOutAt: Date | null;
+  checkedInAt: Date | null;
   // Driver fields exclude driverLicenceNumber by construction — see
   // getDriverLicenceNumber in booking.service.ts for the one path that may
   // read it, with its own justification.
@@ -403,6 +409,12 @@ export async function getBookingDetail(id: string, now: Date = new Date()): Prom
     })),
     cancellationReason: booking.cancellationReason,
     cancelledAt: booking.cancelledAt,
+    odometerOut: booking.odometerOut,
+    odometerIn: booking.odometerIn,
+    fuelOut: booking.fuelOut,
+    fuelIn: booking.fuelIn,
+    checkedOutAt: booking.checkedOutAt,
+    checkedInAt: booking.checkedInAt,
     driver: {
       fullName: booking.driverFullName,
       email: booking.driverEmail,

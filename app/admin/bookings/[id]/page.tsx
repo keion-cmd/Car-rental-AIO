@@ -50,12 +50,30 @@ export default async function AdminBookingDetailPage({
   const canCancel = roleSatisfies(user.role, "MANAGER") && detail.status !== "CANCELLED";
   const pickupTz = detail.pickupLocation?.timezone ?? "UTC";
 
+  // The primary action always reflects the next legal transition — CONFIRMED
+  // -> check out, ONGOING -> check in, otherwise no counter action applies.
+  const primaryAction =
+    detail.status === "CONFIRMED" ? (
+      <Link href={`/admin/bookings/${id}/check-out`} className="admin-primary-button" style={{ textDecoration: "none", display: "inline-block" }}>
+        Check out
+      </Link>
+    ) : detail.status === "ONGOING" ? (
+      <Link href={`/admin/bookings/${id}/check-in`} className="admin-primary-button" style={{ textDecoration: "none", display: "inline-block" }}>
+        Check in
+      </Link>
+    ) : null;
+
   return (
     <>
       <PageHeader
         title={`Booking ${detail.reference}`}
         description={`Booked ${formatDate(detail.createdAt)} via ${detail.source}.`}
-        action={<Link href="/admin/bookings" className="outline-button">← Back to bookings</Link>}
+        action={
+          <>
+            {primaryAction}
+            <Link href="/admin/bookings" className="outline-button" style={{ marginLeft: 10 }}>← Back to bookings</Link>
+          </>
+        }
       />
 
       {errorFlag && (
@@ -150,6 +168,26 @@ export default async function AdminBookingDetailPage({
             </tbody>
           </table>
         </Card>
+
+        {(detail.checkedOutAt || detail.checkedInAt) && (
+          <Card>
+            <h2>Handover record</h2>
+            <dl className="admin-dl">
+              {detail.checkedOutAt && (
+                <>
+                  <dt>Checked out</dt>
+                  <dd>{formatDateTime(detail.checkedOutAt, pickupTz)}<br /><small>Odometer {detail.odometerOut} km · Fuel {detail.fuelOut}/8</small></dd>
+                </>
+              )}
+              {detail.checkedInAt && (
+                <>
+                  <dt>Checked in</dt>
+                  <dd>{formatDateTime(detail.checkedInAt, pickupTz)}<br /><small>Odometer {detail.odometerIn} km · Fuel {detail.fuelIn}/8</small></dd>
+                </>
+              )}
+            </dl>
+          </Card>
+        )}
 
         {detail.cancellationReason && (
           <Card>
