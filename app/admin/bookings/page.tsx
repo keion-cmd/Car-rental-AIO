@@ -32,7 +32,7 @@ function one(v: string | string[] | undefined): string | undefined {
 }
 
 const BOOKING_STATUSES: BookingStatus[] = ["PENDING", "CONFIRMED", "ONGOING", "COMPLETED", "CANCELLED"];
-const PAYMENT_STATUSES: PaymentStatus[] = ["UNPAID", "PARTIALLY_PAID", "PAID", "REFUNDED"];
+const PAYMENT_STATUSES: PaymentStatus[] = ["UNPAID", "PARTIALLY_PAID", "PAID", "REFUNDED", "FAILED"];
 const SORT_FIELDS: SortField[] = ["pickup", "return", "created", "total"];
 
 function formatDateTime(date: Date, timeZone: string): string {
@@ -176,7 +176,7 @@ export default async function AdminBookingsPage({ searchParams }: { searchParams
                     <td><StatusBadge variant={row.status} /></td>
                     <td><StatusBadge variant={row.paymentStatus} /></td>
                     <td>{formatMoney(row.totalAmount, row.currency)}</td>
-                    <td>{row.balanceDue === null ? "—" : formatMoney(row.balanceDue, row.currency)}</td>
+                    <td>{formatMoney(row.balanceDue, row.currency)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -142,6 +142,7 @@ footer { background: var(--ink); color: white; padding: 54px 0 22px; }.footer-to
 .admin-badge-grey { background: #e7e7e3; color: #5b5f58; }
 .admin-badge-grey-outline { background: transparent; border: 1px solid var(--line); color: var(--muted); }
 .admin-badge-purple { background: #ece2f5; color: #5f338f; }
+.admin-badge-red { background: #f8dcdc; color: #9a2b2b; }
 
 @media (max-width: 768px) {
   .admin-sidebar { position: fixed; width: 64px; z-index: 10; }

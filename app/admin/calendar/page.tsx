@@ -6,7 +6,7 @@ import { EmptyState } from "../../components/admin/EmptyState";
 import { Card } from "../../components/admin/Card";
 import { listLocations } from "../../../lib/services/catalog.service";
 import { listVehicleCategories } from "../../../lib/services/fleet.service";
-import { getFleetCalendar, type CalendarBlock, type CalendarVehicleRow } from "../../../lib/services/calendar.service";
+import { getFleetCalendar, getBusinessTimezone, type CalendarBlock, type CalendarVehicleRow } from "../../../lib/services/calendar.service";
 import { zonedTimeToUtc, localDayKey } from "../../../lib/timezone";
 import type { BlockType } from "@prisma/client";
 
@@ -208,10 +208,10 @@ export default async function AdminCalendarPage({ searchParams }: { searchParams
   const [locations, categories] = await Promise.all([listLocations(), listVehicleCategories()]);
 
   const filteredLocation = locationId ? locations.find((l) => l.id === locationId) : undefined;
-  // Across multiple locations there is no configured business timezone on
-  // Settings (schema has none, and adding one is out of scope this phase) —
-  // UTC is used as the neutral reference and called out in the banner below.
-  const referenceTimezone = filteredLocation?.timezone ?? "UTC";
+  // Across multiple locations there is no single location timezone to use —
+  // fall back to the business's own configured timezone (Settings.businessTimezone).
+  const businessTimezone = await getBusinessTimezone();
+  const referenceTimezone = filteredLocation?.timezone ?? businessTimezone;
 
   const anchorDateStr = one(raw.date) ?? localDayKey(now, referenceTimezone);
   const { from, to, columns } = buildWindow(view, anchorDateStr, referenceTimezone);
@@ -263,7 +263,7 @@ export default async function AdminCalendarPage({ searchParams }: { searchParams
         <form method="get" className="admin-filter-form">
           <input type="hidden" name="view" value={view} />
           <select name="locationId" defaultValue={locationId ?? ""}>
-            <option value="">Every location (UTC columns)</option>
+            <option value="">Every location ({businessTimezone} columns)</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>{l.name}</option>
             ))}
@@ -289,7 +289,7 @@ export default async function AdminCalendarPage({ searchParams }: { searchParams
           <Link href={`/admin/calendar?${buildQuery(raw, { date: nextDate })}`} className="outline-button">Next →</Link>
         </div>
         <div className="cal-nav-label">
-          {anchorDateStr} · {view} view · columns in {filteredLocation ? `${filteredLocation.name}'s timezone (${referenceTimezone})` : `UTC — multiple locations, no business timezone configured in Settings`}
+          {anchorDateStr} · {view} view · columns in {filteredLocation ? `${filteredLocation.name}'s timezone (${referenceTimezone})` : `the business timezone (${businessTimezone})`}
         </div>
       </div>
 

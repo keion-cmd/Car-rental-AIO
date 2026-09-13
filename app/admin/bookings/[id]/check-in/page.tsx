@@ -38,6 +38,7 @@ export default async function CheckInPage({
   const errorFlag = Array.isArray(raw.error) ? raw.error[0] : raw.error;
   const rawOdometerIn = Array.isArray(raw.odometerIn) ? raw.odometerIn[0] : raw.odometerIn;
   const rawFuelIn = Array.isArray(raw.fuelIn) ? raw.fuelIn[0] : raw.fuelIn;
+  const rawDamageNote = Array.isArray(raw.damageNote) ? raw.damageNote[0] : raw.damageNote;
 
   const detail = await getBookingDetail(id);
   if (!detail) {
@@ -107,8 +108,7 @@ export default async function CheckInPage({
 
           <div className="admin-field">
             <label htmlFor="damageNote">Damage note (optional)</label>
-            <textarea id="damageNote" name="damageNote" rows={2} />
-            <small>Not yet stored on the booking record — verbal/policy use only in this phase.</small>
+            <textarea id="damageNote" name="damageNote" rows={2} defaultValue={rawDamageNote} />
           </div>
 
           <button type="submit" className="outline-button">Review charges</button>
@@ -147,6 +147,7 @@ export default async function CheckInPage({
             <input type="hidden" name="bookingId" value={detail.id} />
             <input type="hidden" name="odometerIn" value={odometerIn} />
             <input type="hidden" name="fuelIn" value={fuelIn} />
+            <input type="hidden" name="damageNote" value={rawDamageNote ?? ""} />
             <button type="submit" className="admin-primary-button">Confirm and check in</button>
           </form>
         </Card>

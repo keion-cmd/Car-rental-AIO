@@ -233,6 +233,26 @@ export async function createBooking(rawInput: unknown, options?: CreateBookingOp
   }
 }
 
+export interface UpdateStaffNotesOptions {
+  tx?: Prisma.TransactionClient;
+  now?: Date;
+}
+
+// The only write path for Booking.staffNotes — internal only, never exposed
+// on a public route or in a notification payload (see the field's schema
+// comment). Sets the column to exactly `notes`; callers that want to append
+// (check-out/check-in) build the appended string themselves via
+// appendStaffNote before calling this.
+export async function updateStaffNotes(bookingId: string, notes: string, options?: UpdateStaffNotesOptions): Promise<void> {
+  const db = options?.tx ?? prisma;
+  await db.booking.update({ where: { id: bookingId }, data: { staffNotes: notes } });
+}
+
+function appendStaffNote(existing: string | null, label: string, entry: string, now: Date): string {
+  const stamp = `[${now.toISOString()}] ${label}: ${entry}`;
+  return existing ? `${existing}\n${stamp}` : stamp;
+}
+
 export type CancelBookingOutcome = { ok: true } | { ok: false; reason: "BOOKING_NOT_FOUND" | "ALREADY_CANCELLED" };
 
 export async function cancelBooking(bookingId: string, reason: string): Promise<CancelBookingOutcome> {
@@ -282,10 +302,8 @@ export interface CheckOutInput {
   odometerOut: number;
   fuelOut: number; // eighths of a tank, 0-8
   staffUserId: string;
-  // Accepted for interface parity with the spec but NOT persisted — Booking
-  // has no notes column, and this schema deliberately does not carry one
-  // (see the internalNotes comment in booking-query.service.ts). Adding one
-  // is outside the pre-authorised schema change for this phase.
+  // Appended to Booking.staffNotes (timestamped), never overwriting what is
+  // already there — see appendStaffNote below.
   notes?: string;
 }
 
@@ -328,6 +346,11 @@ export async function checkOutBooking(
       },
     });
 
+    if (input.notes && input.notes.trim()) {
+      const appended = appendStaffNote(booking.staffNotes, "Check-out note", input.notes.trim(), now);
+      await updateStaffNotes(bookingId, appended, { tx });
+    }
+
     return { ok: true, bookingId };
   };
 
@@ -343,8 +366,8 @@ export interface CheckInInput {
   odometerIn: number;
   fuelIn: number; // eighths of a tank, 0-8
   staffUserId: string;
-  // Accepted for interface parity with the spec but NOT persisted — see the
-  // matching comment on CheckOutInput.notes.
+  // Appended to Booking.staffNotes (timestamped), never overwriting what is
+  // already there — see appendStaffNote.
   notes?: string;
   damageNote?: string;
 }
@@ -552,6 +575,11 @@ export async function checkInBooking(
       data: { currentLocationId: booking.dropoffLocationId },
     });
 
+    if (input.damageNote && input.damageNote.trim()) {
+      const appended = appendStaffNote(booking.staffNotes, "Check-in damage note", input.damageNote.trim(), now);
+      await updateStaffNotes(bookingId, appended, { tx });
+    }
+
     // TRUNCATION — the block that held this rental's window is cut back to
     // now + turnaround, freeing the vehicle for same-day rebooking on an
     // early return without silently releasing a later window someone else
@@ -590,12 +618,13 @@ async function resolveTurnaroundMinutes(tx: Prisma.TransactionClient, locationId
 export async function getBookingByReference(reference: string) {
   // driverLicenceNumber is identity-document data — never returned by a
   // public-facing read path, encrypted or not. getDriverLicenceNumber below
-  // is the only function that reads it. vehicle/lineItems are included so
-  // the confirmation page can render the full breakdown without a second
-  // write path or query into bookings.
+  // is the only function that reads it. staffNotes is internal-only and must
+  // never reach this public confirmation-page read path either.
+  // vehicle/lineItems are included so the confirmation page can render the
+  // full breakdown without a second write path or query into bookings.
   return prisma.booking.findUnique({
     where: { reference },
-    omit: { driverLicenceNumber: true },
+    omit: { driverLicenceNumber: true, staffNotes: true },
     include: {
       lineItems: { orderBy: { sortOrder: "asc" } },
       vehicle: { include: { model: { include: { category: true } } } },

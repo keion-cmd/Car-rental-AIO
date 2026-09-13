@@ -103,7 +103,6 @@ export default async function CheckOutPage({
             <div className="admin-field">
               <label htmlFor="notes">Condition note (optional)</label>
               <textarea id="notes" name="notes" rows={2} />
-              <small>Not yet stored on the booking record — verbal/policy use only in this phase.</small>
             </div>
 
             <button type="submit" className="admin-primary-button">Check out</button>

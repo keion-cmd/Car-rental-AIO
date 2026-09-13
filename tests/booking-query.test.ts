@@ -10,8 +10,9 @@ import {
   computeBookingFlags,
   prisma as queryPrisma,
 } from "../lib/services/booking-query.service";
-import { cancelBooking, createBooking, prisma as bookingPrisma } from "../lib/services/booking.service";
+import { cancelBooking, createBooking, updateStaffNotes, getBookingByReference, prisma as bookingPrisma } from "../lib/services/booking.service";
 import { isVehicleAvailable, prisma as availabilityPrisma } from "../lib/services/availability.service";
+import { queueNotification, prisma as notificationPrisma } from "../lib/services/notification.service";
 import { encryptField } from "../lib/crypto/field-encryption";
 import { authorize, roleSatisfies } from "../lib/auth/guard";
 import { hashPassword } from "../lib/auth/password";
@@ -156,6 +157,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await prisma.notification.deleteMany({ where: { bookingId: { in: bookingIds } } });
   await prisma.bookingLineItem.deleteMany({ where: { booking: { vehicleId: { in: vehicleIds } } } });
   await prisma.vehicleBlock.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.booking.deleteMany({ where: { id: { in: bookingIds } } });
@@ -170,6 +172,7 @@ afterAll(async () => {
   await bookingPrisma.$disconnect();
   await availabilityPrisma.$disconnect();
   await sessionPrisma.$disconnect();
+  await notificationPrisma.$disconnect();
 });
 
 describe("computeBookingFlags: derived flags", () => {
@@ -414,6 +417,98 @@ describe("authorisation", () => {
     expect(managerOutcome.ok).toBe(true);
     expect(roleSatisfies("STAFF", "MANAGER")).toBe(false);
     expect(roleSatisfies("MANAGER", "MANAGER")).toBe(true);
+  });
+
+  it("P5-P4B-1. amountPaid defaults to 0 on a newly created booking", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-11-01T00:00:00Z"), returnAt: new Date("2031-11-02T00:00:00Z") });
+    const row = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+    expect(row.amountPaid).toBe(BigInt(0));
+  });
+
+  it("P5-P4B-2. balanceDue equals totalAmount when amountPaid is 0", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-11-05T00:00:00Z"), returnAt: new Date("2031-11-06T00:00:00Z") });
+    const detail = await getBookingDetail(booking.id, new Date("2031-06-01T12:00:00Z"));
+    expect(detail?.balanceDue).toBe(detail?.totalAmount);
+  });
+
+  it("P5-P4B-3. balanceDue equals totalAmount - amountPaid when amountPaid is set directly", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-11-10T00:00:00Z"), returnAt: new Date("2031-11-11T00:00:00Z") });
+    await prisma.booking.update({ where: { id: booking.id }, data: { amountPaid: BigInt(50000) } });
+    const detail = await getBookingDetail(booking.id, new Date("2031-06-01T12:00:00Z"));
+    expect(detail?.balanceDue).toBe(detail!.totalAmount - BigInt(50000));
+  });
+
+  it("P5-P4B-4. Settings.businessTimezone is readable and non-empty", async () => {
+    const settings = await prisma.settings.findFirst({ select: { businessTimezone: true } });
+    expect(settings?.businessTimezone).toBeTruthy();
+    expect((settings?.businessTimezone ?? "").length).toBeGreaterThan(0);
+  });
+
+  it("P5-P4B-5. a booking with paymentStatus FAILED is flagged needsAttention", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({
+      vehicleId: vehicle.id,
+      pickupLocationId: locUtc,
+      pickupAt: new Date("2031-12-01T00:00:00Z"),
+      returnAt: new Date("2031-12-02T00:00:00Z"),
+      status: "CONFIRMED",
+      paymentStatus: "FAILED",
+    });
+    const detail = await getBookingDetail(booking.id, new Date("2031-06-01T12:00:00Z"));
+    expect(detail?.needsAttention).toBe(true);
+  });
+
+  it("P5-P4B-6. a PAID booking that is neither overdue nor stale PENDING is not flagged", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({
+      vehicleId: vehicle.id,
+      pickupLocationId: locUtc,
+      pickupAt: new Date("2031-12-05T00:00:00Z"),
+      returnAt: new Date("2031-12-06T00:00:00Z"),
+      status: "CONFIRMED",
+      paymentStatus: "PAID",
+    });
+    const detail = await getBookingDetail(booking.id, new Date("2031-06-01T12:00:00Z"));
+    expect(detail?.needsAttention).toBe(false);
+  });
+
+  it("P5-P4B-7. updateStaffNotes persists and is readable on the detail", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-12-10T00:00:00Z"), returnAt: new Date("2031-12-11T00:00:00Z") });
+    await updateStaffNotes(booking.id, "Customer requested extra blanket.");
+    const detail = await getBookingDetail(booking.id, new Date("2031-06-01T12:00:00Z"));
+    expect(detail?.staffNotes).toBe("Customer requested extra blanket.");
+  });
+
+  it("P5-P4B-8. staffNotes is NOT present in any notification payload", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-12-15T00:00:00Z"), returnAt: new Date("2031-12-16T00:00:00Z") });
+    await updateStaffNotes(booking.id, "Internal-only secret note.");
+
+    await queueNotification({
+      type: "BOOKING_RECEIVED",
+      channel: "EMAIL",
+      recipient: "driver@example.com",
+      bookingId: booking.id,
+      templateKey: "booking-received",
+      payload: { reference: booking.reference },
+    });
+
+    const notification = await prisma.notification.findFirst({ where: { bookingId: booking.id }, orderBy: { createdAt: "desc" } });
+    expect(JSON.stringify(notification?.payload)).not.toContain("Internal-only secret note.");
+  });
+
+  it("P5-P4B-9. staffNotes is NOT returned by getBookingByReference", async () => {
+    const vehicle = await createTestVehicle(locUtc);
+    const booking = await createTestBooking({ vehicleId: vehicle.id, pickupLocationId: locUtc, pickupAt: new Date("2031-12-20T00:00:00Z"), returnAt: new Date("2031-12-21T00:00:00Z") });
+    await updateStaffNotes(booking.id, "Should never be public.");
+
+    const publicBooking = await getBookingByReference(booking.reference);
+    expect(publicBooking).not.toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(publicBooking, "staffNotes")).toBe(false);
   });
 
   it("20. cancelling via the action releases the vehicle block, and the vehicle becomes available again", async () => {

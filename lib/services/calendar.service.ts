@@ -66,6 +66,14 @@ export interface FleetCalendarResult {
   totalVehicleCount: number;
 }
 
+// The reference timezone for calendar columns when no single location is
+// selected. Settings.businessTimezone always has a value (non-nullable,
+// defaulted) — there is exactly one Settings row.
+export async function getBusinessTimezone(db: DbClient = prisma): Promise<string> {
+  const settings = await db.settings.findFirst({ select: { businessTimezone: true } });
+  return settings?.businessTimezone ?? "Asia/Manila";
+}
+
 type RawBlockRow = {
   id: string;
   vehicle_id: string;

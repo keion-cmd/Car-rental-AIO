@@ -85,7 +85,7 @@ export default async function VehicleDetailPage({
   return (
     <>
       <PageHeader
-        title={`${detail.make} ${detail.model} · ${detail.plateNumber}`}
+        title={`${detail.make} ${detail.model}${detail.year ? ` (${detail.year})` : ""} · ${detail.fleetNumber ?? detail.plateNumber}`}
         description={`${detail.categoryName} · ${detail.seats} seats · ${detail.transmission} · ${detail.fuelType}`}
         action={<Link href="/admin/fleet" className="outline-button">← Back to fleet</Link>}
       />
@@ -126,8 +126,12 @@ export default async function VehicleDetailPage({
           <Card>
             <h2>Identity &amp; location</h2>
             <dl className="admin-dl">
+              <dt>Fleet #</dt>
+              <dd>{detail.fleetNumber ?? "—"}</dd>
               <dt>Plate</dt>
               <dd>{detail.plateNumber}</dd>
+              <dt>Year</dt>
+              <dd>{detail.year ?? "—"}</dd>
               <dt>Category</dt>
               <dd>{detail.categoryName}</dd>
               <dt>Home location</dt>

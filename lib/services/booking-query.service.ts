@@ -38,10 +38,7 @@ export interface BookingFlags {
   needsAttention: boolean;
 }
 
-// A booking is a stale pending lead 2 hours after it was created. Payment
-// FAILED does not exist in the PaymentStatus enum (UNPAID / PARTIALLY_PAID /
-// PAID / REFUNDED only) — inventing it is out of scope (AGENTS.md), so that
-// clause of the original "needsAttention" definition is omitted here.
+// A booking is a stale pending lead 2 hours after it was created.
 const PENDING_STALE_MS = 2 * 60 * 60 * 1000;
 
 function localDateString(date: Date, timeZone: string): string {
@@ -66,7 +63,7 @@ export function computeBookingFlags(
     booking.status === "ONGOING" && localDateString(booking.returnAt, pickupLocationTimezone) === todayAtPickupLocation;
 
   const isPendingStale = booking.status === "PENDING" && now.getTime() - booking.createdAt.getTime() > PENDING_STALE_MS;
-  const needsAttention = isPendingStale || isOverdue;
+  const needsAttention = isPendingStale || isOverdue || booking.paymentStatus === "FAILED";
 
   return { isOverdue, isStartingToday, isReturningToday, needsAttention };
 }
@@ -108,10 +105,7 @@ export interface BookingListRow extends BookingFlags {
   paymentStatus: PaymentStatus;
   totalAmount: bigint;
   currency: string;
-  // null means "cannot be derived" — there is no payment-ledger/amountPaid
-  // column on Booking, so a PARTIALLY_PAID balance is genuinely unknown
-  // rather than computable. See getBookingDetail's doc comment.
-  balanceDue: bigint | null;
+  balanceDue: bigint;
   createdAt: Date;
 }
 
@@ -142,10 +136,8 @@ export interface ListBookingsResult {
 
 const DEFAULT_LIMIT = 20;
 
-function balanceDueFor(paymentStatus: PaymentStatus, totalAmount: bigint): bigint | null {
-  if (paymentStatus === "PAID" || paymentStatus === "REFUNDED") return BigInt(0);
-  if (paymentStatus === "UNPAID") return totalAmount;
-  return null; // PARTIALLY_PAID — amount paid is not tracked anywhere yet
+function balanceDueFor(totalAmount: bigint, amountPaid: bigint): bigint {
+  return totalAmount - amountPaid;
 }
 
 const BASE_SELECT = {
@@ -158,6 +150,7 @@ const BASE_SELECT = {
   status: true,
   paymentStatus: true,
   totalAmount: true,
+  amountPaid: true,
   currency: true,
   createdAt: true,
   customer: { select: { name: true, email: true, phone: true } },
@@ -174,6 +167,7 @@ type RawBookingRow = {
   status: BookingStatus;
   paymentStatus: PaymentStatus;
   totalAmount: bigint;
+  amountPaid: bigint;
   currency: string;
   createdAt: Date;
   customer: { name: string; email: string; phone: string | null };
@@ -203,7 +197,7 @@ function toRow(b: RawBookingRow, locations: Map<string, CatalogLocation>, now: D
     paymentStatus: b.paymentStatus,
     totalAmount: b.totalAmount,
     currency: b.currency,
-    balanceDue: balanceDueFor(b.paymentStatus, b.totalAmount),
+    balanceDue: balanceDueFor(b.totalAmount, b.amountPaid),
     createdAt: b.createdAt,
   };
 }
@@ -314,7 +308,8 @@ export interface BookingDetail extends BookingFlags {
   taxAmount: bigint;
   securityDeposit: bigint;
   totalAmount: bigint;
-  balanceDue: bigint | null;
+  amountPaid: bigint;
+  balanceDue: bigint;
   currency: string;
   rentalDays: number;
   lineItems: Array<{
@@ -346,9 +341,9 @@ export interface BookingDetail extends BookingFlags {
     licenceExpiry: Date;
   };
   createdAt: Date;
-  // This schema has no internal-notes column on Booking (or anywhere else
-  // tied to a booking) — per AGENTS.md, do not add one. Nothing to render.
-  internalNotes: null;
+  // Internal only — never expose this field on any public route or in any
+  // notification payload.
+  staffNotes: string | null;
 }
 
 export async function getBookingDetail(id: string, now: Date = new Date()): Promise<BookingDetail | null> {
@@ -395,7 +390,8 @@ export async function getBookingDetail(id: string, now: Date = new Date()): Prom
     taxAmount: booking.taxAmount,
     securityDeposit: booking.securityDeposit,
     totalAmount: booking.totalAmount,
-    balanceDue: balanceDueFor(booking.paymentStatus, booking.totalAmount),
+    amountPaid: booking.amountPaid,
+    balanceDue: balanceDueFor(booking.totalAmount, booking.amountPaid),
     currency: booking.currency,
     rentalDays: booking.rentalDays,
     lineItems: booking.lineItems.map((li) => ({
@@ -424,6 +420,6 @@ export async function getBookingDetail(id: string, now: Date = new Date()): Prom
       licenceExpiry: booking.driverLicenceExpiry,
     },
     createdAt: booking.createdAt,
-    internalNotes: null,
+    staffNotes: booking.staffNotes,
   };
 }

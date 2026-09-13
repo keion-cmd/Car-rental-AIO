@@ -111,7 +111,7 @@ export default async function AdminFleetPage({ searchParams }: { searchParams: P
                 <tr>
                   <th>Photo</th>
                   <th>Vehicle</th>
-                  <th>Plate</th>
+                  <th>Fleet #</th>
                   <th>Category</th>
                   <th>Status</th>
                   <th>Location</th>
@@ -131,10 +131,10 @@ export default async function AdminFleetPage({ searchParams }: { searchParams: P
                       )}
                     </td>
                     <td>
-                      <Link href={`/admin/fleet/${row.id}`}>{row.make} {row.model}</Link>
+                      <Link href={`/admin/fleet/${row.id}`}>{row.make} {row.model}{row.year ? ` (${row.year})` : ""}</Link>
                       {row.archivedAt && <div><small>Archived {formatDate(row.archivedAt)}</small></div>}
                     </td>
-                    <td>{row.plateNumber}</td>
+                    <td>{row.fleetNumber ?? row.plateNumber}</td>
                     <td>{row.categoryName}</td>
                     <td><StatusBadge variant={row.status as StatusBadgeVariant} /></td>
                     <td>{row.currentLocationName}</td>

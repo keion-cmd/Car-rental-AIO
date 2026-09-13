@@ -7,7 +7,7 @@ import { Card } from "../../../components/admin/Card";
 import { StatusBadge } from "../../../components/admin/StatusBadge";
 import { formatMoney } from "../../../../lib/money";
 import { getBookingDetail } from "../../../../lib/services/booking-query.service";
-import { cancelBookingAction } from "../../../actions/bookings";
+import { cancelBookingAction, updateStaffNotesAction } from "../../../actions/bookings";
 
 export const metadata: Metadata = {
   title: "Booking detail | Amihan Car Rentals",
@@ -48,6 +48,7 @@ export default async function AdminBookingDetailPage({
   }
 
   const canCancel = roleSatisfies(user.role, "MANAGER") && detail.status !== "CANCELLED";
+  const canEditNotes = roleSatisfies(user.role, "MANAGER");
   const pickupTz = detail.pickupLocation?.timezone ?? "UTC";
 
   // The primary action always reflects the next legal transition — CONFIRMED
@@ -163,7 +164,7 @@ export default async function AdminBookingDetailPage({
               </tr>
               <tr>
                 <td>Balance due</td>
-                <td>{detail.balanceDue === null ? "Partially paid — amount not tracked" : formatMoney(detail.balanceDue, detail.currency)}</td>
+                <td>{formatMoney(detail.balanceDue, detail.currency)}</td>
               </tr>
             </tbody>
           </table>
@@ -188,6 +189,18 @@ export default async function AdminBookingDetailPage({
             </dl>
           </Card>
         )}
+
+        <Card>
+          <h2>Staff notes</h2>
+          <p style={{ whiteSpace: "pre-wrap" }}>{detail.staffNotes ?? "No notes yet."}</p>
+          {canEditNotes && (
+            <form action={updateStaffNotesAction} style={{ marginTop: 10 }}>
+              <input type="hidden" name="bookingId" value={detail.id} />
+              <textarea name="notes" defaultValue={detail.staffNotes ?? ""} rows={4} style={{ width: "100%" }} />
+              <button type="submit" className="outline-button" style={{ marginTop: 10 }}>Save notes</button>
+            </form>
+          )}
+        </Card>
 
         {detail.cancellationReason && (
           <Card>

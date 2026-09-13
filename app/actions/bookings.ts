@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { requireAuth } from "../../lib/auth/guard";
-import { cancelBooking } from "../../lib/services/booking.service";
+import { cancelBooking, updateStaffNotes } from "../../lib/services/booking.service";
 
 // The only write path this screen uses. Cancelling requires MANAGER — STAFF
 // may view the bookings list/detail but not act on it. requireAuth redirects
@@ -25,5 +25,22 @@ export async function cancelBookingAction(formData: FormData): Promise<void> {
     redirect(`/admin/bookings/${bookingId}?error=${outcome.reason.toLowerCase().replace(/_/g, "-")}`);
   }
 
+  redirect(`/admin/bookings/${bookingId}`);
+}
+
+// staffNotes is internal-only — MANAGER may edit it from the booking detail
+// page. This is the only screen that writes it directly (check-out/check-in
+// also write it, via booking.service's own append path).
+export async function updateStaffNotesAction(formData: FormData): Promise<void> {
+  await requireAuth("MANAGER");
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  const notes = String(formData.get("notes") ?? "");
+
+  if (!bookingId) {
+    redirect(`/admin/bookings/${bookingId}`);
+  }
+
+  await updateStaffNotes(bookingId, notes);
   redirect(`/admin/bookings/${bookingId}`);
 }

@@ -23,6 +23,8 @@ import {
 import { computeBlockWindow, prisma as availabilityPrisma } from "../lib/services/availability.service";
 import { runVehicleSearch } from "../lib/services/search.service";
 import { listBrowsableVehiclesByCategory } from "../lib/services/catalog.service";
+import { getBusinessTimezone, prisma as calendarPrisma } from "../lib/services/calendar.service";
+import { localDayKey } from "../lib/timezone";
 import { authorize } from "../lib/auth/guard";
 import { hashPassword } from "../lib/auth/password";
 
@@ -169,6 +171,7 @@ afterAll(async () => {
   await prisma.$disconnect();
   await fleetPrisma.$disconnect();
   await availabilityPrisma.$disconnect();
+  await calendarPrisma.$disconnect();
 });
 
 describe("vehicle CRUD", () => {
@@ -652,5 +655,57 @@ describe("atomicity", () => {
     const recordsAfter = await prisma.maintenanceRecord.count({ where: { vehicleId: vehicle.id } });
     expect(blocksAfter).toBe(blocksBefore);
     expect(recordsAfter).toBe(recordsBefore);
+  });
+});
+
+describe("fleet identity (P5-P4B)", () => {
+  it("P5-P4B-10. fleetNumber is optional — a vehicle without one is still valid", async () => {
+    const vehicle = await createTestVehicle();
+    const row = await prisma.vehicle.findUniqueOrThrow({ where: { id: vehicle.id } });
+    expect(row.fleetNumber).toBeNull();
+  });
+
+  it("P5-P4B-11. two vehicles cannot share a fleetNumber", async () => {
+    const fleetNumber = `V-${Math.random().toString(36).slice(2, 8)}`;
+    const a = await createTestVehicle();
+    await prisma.vehicle.update({ where: { id: a.id }, data: { fleetNumber } });
+
+    const b = await createTestVehicle();
+    await expect(prisma.vehicle.update({ where: { id: b.id }, data: { fleetNumber } })).rejects.toThrow();
+  });
+
+  it("P5-P4B-12. listVehicles returns fleetNumber and year when present", async () => {
+    const fleetNumber = `V-${Math.random().toString(36).slice(2, 8)}`;
+    const vehicle = await createTestVehicle();
+    await prisma.vehicle.update({ where: { id: vehicle.id }, data: { fleetNumber, year: 2022 } });
+
+    const rows = await listVehicles({ search: vehicle.plateNumber }, new Date());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].fleetNumber).toBe(fleetNumber);
+    expect(rows[0].year).toBe(2022);
+  });
+});
+
+describe("calendar timezone (P5-P4B)", () => {
+  it("P5-P4B-13. with no location filter, day boundaries use Settings.businessTimezone, not UTC", async () => {
+    const settings = await prisma.settings.findFirst();
+    const originalTimezone = settings?.businessTimezone;
+    await prisma.settings.updateMany({ data: { businessTimezone: "Pacific/Kiritimati" } });
+
+    try {
+      const businessTimezone = await getBusinessTimezone();
+      expect(businessTimezone).toBe("Pacific/Kiritimati");
+
+      // Pacific/Kiritimati is UTC+14 — an instant that is still "today" in
+      // UTC is already "tomorrow" there, proving the boundary genuinely
+      // depends on the configured business timezone, not a UTC fallback.
+      const instant = new Date("2050-01-01T23:00:00Z");
+      expect(localDayKey(instant, businessTimezone)).toBe("2050-01-02");
+      expect(localDayKey(instant, "UTC")).toBe("2050-01-01");
+    } finally {
+      if (originalTimezone !== undefined) {
+        await prisma.settings.updateMany({ data: { businessTimezone: originalTimezone } });
+      }
+    }
   });
 });

@@ -83,6 +83,8 @@ export interface FleetFilters {
 export interface FleetListRow {
   id: string;
   plateNumber: string;
+  fleetNumber: string | null;
+  year: number | null;
   make: string;
   model: string;
   categoryId: string;
@@ -125,6 +127,8 @@ export async function listVehicles(
     select: {
       id: true,
       plateNumber: true,
+      fleetNumber: true,
+      year: true,
       dailyRate: true,
       isBookableOnline: true,
       archivedAt: true,
@@ -150,6 +154,8 @@ export async function listVehicles(
     rows.push({
       id: v.id,
       plateNumber: v.plateNumber,
+      fleetNumber: v.fleetNumber,
+      year: v.year,
       make: v.model.make,
       model: v.model.model,
       categoryId: v.model.category.id,
@@ -200,6 +206,8 @@ export interface MaintenanceRow {
 export interface VehicleDetail {
   id: string;
   plateNumber: string;
+  fleetNumber: string | null;
+  year: number | null;
   make: string;
   model: string;
   seats: number;
@@ -281,6 +289,8 @@ export async function getVehicleDetail(id: string, now: Date = new Date(), db: D
   return {
     id: vehicle.id,
     plateNumber: vehicle.plateNumber,
+    fleetNumber: vehicle.fleetNumber,
+    year: vehicle.year,
     make: vehicle.model.make,
     model: vehicle.model.model,
     seats: vehicle.model.seats,
