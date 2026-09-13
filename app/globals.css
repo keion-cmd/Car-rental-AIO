@@ -279,6 +279,47 @@ footer { background: var(--ink); color: white; padding: 54px 0 22px; }.footer-to
 .admin-charge-summary td { padding: 4px 0; }
 .admin-charge-summary .admin-gap-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
 
+/* Fleet timeline (P5-P4): resource calendar — rows are vehicles, columns are
+   time, bars are blocks. All positioning is server-computed percentages, no
+   client JS. */
+.cal-nav { align-items: center; display: flex; flex-wrap: wrap; gap: 14px; justify-content: space-between; margin-bottom: 16px; }
+.cal-nav-buttons { display: flex; gap: 8px; }
+.cal-nav-label { color: var(--muted); font-size: 12px; }
+
+.cal-grid-wrap { overflow-x: auto; }
+.cal-grid { display: grid; font-size: 11px; min-width: 640px; }
+.cal-corner { background: white; position: sticky; left: 0; z-index: 2; }
+.cal-col-header { border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; letter-spacing: .03em; padding: 8px 6px; text-align: center; text-transform: uppercase; }
+
+.cal-group { display: grid; }
+.cal-group-heading { background: var(--cream); font-size: 10px; font-weight: 800; letter-spacing: .04em; padding: 6px 10px; text-transform: uppercase; }
+
+.cal-row { border-bottom: 1px solid var(--line); display: grid; min-height: 40px; }
+.cal-row-label { align-items: center; background: white; display: flex; flex-direction: column; gap: 2px; justify-content: center; padding: 6px 10px; position: sticky; left: 0; z-index: 1; }
+.cal-row-label small { color: var(--muted); font-size: 10px; }
+
+.cal-track { position: relative; }
+.cal-now-line { background: var(--orange); bottom: 0; position: absolute; top: 0; width: 2px; z-index: 3; }
+
+.cal-bar-wrap { color: inherit; display: block; height: 100%; position: absolute; text-decoration: none; top: 0; }
+.cal-bar-solid { align-items: center; border-radius: 3px; box-sizing: border-box; color: white; display: flex; font-size: 10px; font-weight: 700; gap: 4px; height: 26px; overflow: hidden; padding: 0 6px; position: absolute; top: 6px; white-space: nowrap; }
+.cal-bar-buffer { background-image: repeating-linear-gradient(45deg, currentColor 0, currentColor 2px, transparent 2px, transparent 6px); background-color: #e7e7e3; color: var(--muted); border-radius: 3px; height: 12px; opacity: .8; position: absolute; top: 13px; }
+.cal-bar-label { overflow: hidden; text-overflow: ellipsis; }
+.cal-bar-icon { flex-shrink: 0; }
+.cal-bar-overdue-flag { background: #92231f; border-radius: 8px; flex-shrink: 0; font-size: 8px; margin-left: 4px; padding: 1px 5px; }
+.cal-bar-clip { border-top: 13px solid transparent; border-bottom: 13px solid transparent; position: absolute; top: 0; width: 0; }
+.cal-bar-clip-start { border-left: 6px solid white; left: 0; }
+.cal-bar-clip-end { border-right: 6px solid white; right: 0; }
+
+.cal-bar-booking { background: #2a4f8a; }
+.cal-bar-hold { background: #92620d; }
+.cal-bar-maintenance { background: #5f338f; }
+.cal-bar-manual { background: #5b5f58; }
+.cal-bar-transfer { background: #206b3a; }
+
+.cal-pagination { align-items: center; gap: 14px; }
+.cal-pagination span { color: var(--muted); font-size: 12px; }
+
 @media (max-width: 900px) { .search-summary { grid-template-columns: 1fr; } .booking-wizard-body { grid-template-columns: 1fr; } .booking-confirmation-grid { grid-template-columns: 1fr; } .admin-detail-grid { grid-template-columns: 1fr; } }
 
 @media (max-width: 900px) { .nav-links { margin-left: 0; }.phone-link { display: none; }.search-card { grid-template-columns: 150px 1fr; }.search-card form { grid-template-columns: repeat(3, 1fr); row-gap: 16px; }.search-button { min-height: 44px; }.trust-items { gap: 20px; grid-template-columns: repeat(2, 1fr); padding: 25px 0; }.rating { border-left: 0; justify-content: flex-start; padding-left: 0; }.hero-copy { width: 53%; }.hero-visual { opacity: .75; }.story-grid { gap: 45px; } }
