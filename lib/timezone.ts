@@ -37,3 +37,11 @@ export function zonedTimeToUtc(dateStr: string, timeStr: string, timeZone: strin
 
   return new Date(instantMs);
 }
+
+// The inverse direction: which wall-clock calendar day (in `timeZone`) does
+// this UTC instant fall on. en-CA formats as YYYY-MM-DD, giving a directly
+// comparable calendar-date string — used to bucket instants into day
+// columns without an external tz library.
+export function localDayKey(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
