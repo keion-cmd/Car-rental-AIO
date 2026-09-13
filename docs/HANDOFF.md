@@ -2,7 +2,8 @@
 
 ## Current phase
 
-P3-P0 complete (driver licence capture schema). Prior phase committed at `c972df1`.
+P4-P1 complete (staff authentication: password + session schema, login,
+role-based route guard). Prior phase committed at `1d04d0c`.
 
 ## Database
 
@@ -23,6 +24,9 @@ on any new machine. Required variable **names** (values are never stored here):
   **Losing this key makes every stored licence number permanently unreadable** — there is no
   recovery path. Generate a new one with `crypto.randomBytes(32).toString('hex')`; never
   commit it.
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — read once by `scripts/create-admin.ts` to bootstrap the
+  first `OWNER` account. Not read anywhere else, never logged, never committed. The script
+  refuses to run if a user with `ADMIN_EMAIL` already exists.
 
 ### Permanent rule
 
@@ -40,11 +44,26 @@ IPv6-only, which is not reachable from the current environment.
 
 Enums: `VehicleTransmission`, `VehicleFuelType`, `BookingStatus`, `PaymentStatus`,
 `BlockType`, `BookingSource`, `QuoteStatus`, `MaintenanceType`, `MaintenanceStatus`,
-`UserRole`.
+`UserRole` (`OWNER`, `ADMIN`, `MANAGER`, `STAFF` — `OWNER` added in P4-P1).
 
 Tables: `settings`, `users`, `locations`, `location_pairs`, `vehicle_categories`,
 `vehicle_models`, `vehicles`, `vehicle_images`, `customers`, `quotes`, `bookings`,
-`booking_line_items`, `maintenance_records`, `vehicle_blocks`.
+`booking_line_items`, `maintenance_records`, `vehicle_blocks`, `notifications`,
+`sessions` (P4-P1).
+
+## Staff authentication (P4-P1)
+
+`users` gained `password_hash` (required, scrypt-encoded, see
+`lib/auth/password.ts`), `last_login_at`, `failed_login_attempts`, `locked_until`.
+New `sessions` table stores only a SHA-256 hash of each opaque session token
+(`lib/auth/session.ts`) — never the token itself. Login lives in
+`lib/services/auth.service.ts` (5 failed attempts locks an account for 15 minutes);
+the single route guard is `requireAuth()` / `authorize()` in `lib/auth/guard.ts`, which
+every `app/admin/**` route must call directly (fail-closed: `minimumRole` is a required
+parameter and an unranked role always loses the comparison). `app/admin/login` and
+`app/admin` (a placeholder behind the guard) are the only pages this phase adds — the
+real admin shell is P4-P2. `scripts/create-admin.ts` bootstraps the first `OWNER`
+account from `ADMIN_EMAIL`/`ADMIN_PASSWORD` (see env var list above).
 
 ## Driver licence capture (P3-P0)
 
@@ -84,17 +103,17 @@ and no application-level check should be treated as a substitute for it.
 ## Deferred (not yet built)
 
 - Row-level security (RLS) policies
-- Tables: `payments`, `addons`, `pricing_rules`, `promo_codes`, `notifications`,
-  `audit_logs`
-- All UI
-- Authentication
+- Tables: `payments`, `addons`, `pricing_rules`, `promo_codes`, `audit_logs`
+- The admin shell (nav, sections, feature screens) and all other UI
+- Password reset, email verification, MFA, user management screens,
+  location-scoped permissions, audit logging, rate limiting beyond the login lockout
 - Remote Supabase migration (see above)
 
 ## NO-GO list
 
 Do not, without explicit sign-off:
 
-- Add pages or auth (none exist as of P1-P2)
+- Build the admin shell, sidebar, or any feature screen behind the P4-P1 login guard
 - Alter or bypass the `vehicle_blocks` exclusion constraint
 - Change the money-as-`BigInt` (minor units) rule for monetary columns
 - Change timestamp storage away from `timestamptz` / UTC
