@@ -35,6 +35,7 @@ enum PaymentStatus {
   PARTIALLY_PAID
   PAID
   REFUNDED
+  FAILED
 }
 
 enum BlockType {
@@ -125,6 +126,7 @@ enum NotificationStatus {
 model Settings {
   id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   currency               String   @default("PHP")
+  businessTimezone       String   @default("Asia/Manila") @map("business_timezone")
   // Operational time consumed by availability between two bookings on the
   // same vehicle (cleaning, inspection, repositioning). Distinct from
   // billingGraceMinutes below — do not conflate the two.
@@ -258,6 +260,12 @@ model Vehicle {
   id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   modelId            String   @map("model_id") @db.Uuid
   plateNumber        String   @unique @map("plate_number")
+  // The label staff say out loud — "V-014" — distinct from the plate.
+  // Nullable: existing vehicles have no value and inventing one is worse
+  // than leaving it empty. Unique because two cars sharing one is a radio
+  // conversation that ends with the wrong car.
+  fleetNumber        String?  @unique @map("fleet_number")
+  year               Int?
   homeLocationId     String   @map("home_location_id") @db.Uuid
   currentLocationId  String   @map("current_location_id") @db.Uuid
   isBookableOnline   Boolean  @default(true) @map("is_bookable_online")
@@ -431,6 +439,13 @@ model Booking {
   checkedInAt          DateTime?     @map("checked_in_at") @db.Timestamptz
   checkedOutById       String?       @map("checked_out_by_id") @db.Uuid
   checkedInById        String?       @map("checked_in_by_id") @db.Uuid
+  // Internal only — must NEVER be exposed on any public route or in any
+  // notification payload.
+  staffNotes           String?       @map("staff_notes")
+  // Minor units, like every other money column. Defaults to 0 — correct
+  // for every existing booking (all UNPAID). Nothing writes this yet
+  // (P8 owns that); it makes balanceDue computable instead of null.
+  amountPaid           BigInt        @default(0) @map("amount_paid")
   createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
