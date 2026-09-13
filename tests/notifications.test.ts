@@ -7,6 +7,11 @@ import { prisma as bookingPrisma } from "../lib/services/booking.service";
 import { processQueuedNotifications, prisma as notificationPrisma } from "../lib/services/notification.service";
 import { renderBookingReceived, type BookingReceivedPayload } from "../lib/notifications/templates/booking-received";
 import type { EmailProvider } from "../lib/notifications/provider.interface";
+import { prisma as quotePrisma } from "../lib/services/quote.service";
+import { prisma as availabilityPrisma } from "../lib/services/availability.service";
+import { prisma as customerPrisma } from "../lib/services/customer.service";
+import { prisma as searchPrisma } from "../lib/services/search.service";
+import { prisma as catalogPrisma } from "../lib/services/catalog.service";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
 
@@ -146,6 +151,11 @@ afterAll(async () => {
   await prisma.$disconnect();
   await bookingPrisma.$disconnect();
   await notificationPrisma.$disconnect();
+  await quotePrisma.$disconnect();
+  await availabilityPrisma.$disconnect();
+  await customerPrisma.$disconnect();
+  await searchPrisma.$disconnect();
+  await catalogPrisma.$disconnect();
 });
 
 describe("queueing", () => {

@@ -1,6 +1,11 @@
 import { listLocations, listFeaturedVehicles, getCurrency } from "../lib/services/catalog.service";
 import { formatMoney } from "../lib/money";
 import { SearchForm } from "./components/SearchForm";
+import { SiteFooter } from "./components/SiteFooter";
+
+// Fleet, locations, and pricing come from the database and change when an
+// admin changes them, not when the code changes — must not be frozen at build time.
+export const dynamic = "force-dynamic";
 
 export default async function Home() {
   const [locations, fleet, currency] = await Promise.all([
@@ -118,7 +123,7 @@ export default async function Home() {
 
       <section className="locations-section" id="locations"><div className="container"><div className="section-header"><div><div className="eyebrow"><span /> COME FIND US</div><h2>Start anywhere.<br /><em>Go everywhere.</em></h2></div><p className="section-intro">Easy pickup in the places you&apos;re most likely to land, work, and wander.</p></div><div className="location-grid">{locations.map((item, index) => <a href="#search" className={`location-card location-${index}`} key={item.id}><span className="location-code">{item.name.slice(0, 3).toUpperCase()}</span><div><h3>{item.name}</h3><p>{item.isAirport ? "Airport pickup available" : "City pickup"}</p></div><span className="location-arrow">↗</span></a>)}</div></div></section>
 
-      <footer><div className="container footer-top"><a className="brand footer-brand" href="#top"><span className="brand-mark">A</span><span><strong>amihan</strong><small>CAR RENTALS</small></span></a><div className="footer-quote">Take the scenic route.<br /><em>We&apos;ll handle the rest.</em></div><div className="footer-links"><a href="#fleet">Fleet</a><a href="#locations">Locations</a><a href="#how-it-works">About us</a><a href="mailto:hello@amihancars.ph">Contact</a></div></div><div className="container footer-bottom"><span>© 2026 Amihan Car Rentals</span><span>Made for the road ahead in the Philippines <b>✦</b></span><div><a href="#top">Privacy</a><a href="#top">Terms</a></div></div></footer>
+      <SiteFooter />
     </main>
   );
 }

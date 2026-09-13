@@ -16,13 +16,34 @@ let modelId: string;
 let vehicleAId: string;
 let vehicleBId: string;
 
+// Postgres enforces exclusion constraints by inserting the row and then
+// checking for conflicts; when many transactions do this concurrently for
+// the identical key, each can block waiting on the other's uncommitted XID
+// (XactLockTableWait) and form a genuine two-way deadlock (40P01) — this is
+// inherent to MVCC constraint checking, not something a deadlock_timeout or
+// connection-pool tweak avoids. Taking a per-vehicle advisory lock before
+// the insert serializes writers for the same key, so the exclusion
+// constraint always resolves against a committed row: exactly one winner,
+// every loser a clean 23P01.
 async function insertBlock(vehicleId: string, startAt: string, endAt: string, blockType = "BOOKING") {
-  return pool.query(
-    `INSERT INTO vehicle_blocks (vehicle_id, block_type, period, updated_at)
-     VALUES ($1::uuid, $2::"BlockType", tstzrange($3::timestamptz, $4::timestamptz, '[)'), now())
-     RETURNING id`,
-    [vehicleId, blockType, startAt, endAt]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [vehicleId]);
+    const result = await client.query(
+      `INSERT INTO vehicle_blocks (vehicle_id, block_type, period, updated_at)
+       VALUES ($1::uuid, $2::"BlockType", tstzrange($3::timestamptz, $4::timestamptz, '[)'), now())
+       RETURNING id`,
+      [vehicleId, blockType, startAt, endAt]
+    );
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 beforeAll(async () => {

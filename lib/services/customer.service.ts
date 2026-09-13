@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import type { DbClient } from "./availability.service";
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 export interface FindOrCreateCustomerInput {
   email: string;

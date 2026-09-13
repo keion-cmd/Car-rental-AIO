@@ -3,10 +3,15 @@ import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { selectVehicle, repriceForDriver, submitBooking } from "../lib/services/booking-flow.service";
-import { getQuote } from "../lib/services/quote.service";
+import { getQuote, prisma as quotePrisma } from "../lib/services/quote.service";
 import { getBookingByReference, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
 import { quote, type QuoteSettingsInput } from "../lib/pricing/quote";
 import { createBookingInputSchema } from "../lib/validation/booking";
+import { prisma as availabilityPrisma } from "../lib/services/availability.service";
+import { prisma as customerPrisma } from "../lib/services/customer.service";
+import { prisma as searchPrisma } from "../lib/services/search.service";
+import { prisma as catalogPrisma } from "../lib/services/catalog.service";
+import { prisma as notificationPrisma } from "../lib/services/notification.service";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
 
@@ -115,6 +120,12 @@ afterAll(async () => {
   await prisma.location.deleteMany({ where: { id: locA } });
   await prisma.$disconnect();
   await bookingPrisma.$disconnect();
+  await quotePrisma.$disconnect();
+  await availabilityPrisma.$disconnect();
+  await customerPrisma.$disconnect();
+  await searchPrisma.$disconnect();
+  await catalogPrisma.$disconnect();
+  await notificationPrisma.$disconnect();
 });
 
 describe("entering the flow", () => {

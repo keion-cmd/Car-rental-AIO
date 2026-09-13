@@ -10,6 +10,10 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Quote hold state is time-sensitive and per-request; must never be cached
+// or frozen at build time.
+export const dynamic = "force-dynamic";
+
 function ExpiredOrMissing({ heading, body }: { heading: string; body: string }) {
   return (
     <main>

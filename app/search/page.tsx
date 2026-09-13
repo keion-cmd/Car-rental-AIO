@@ -12,6 +12,9 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Availability and pricing are read live from the database per request.
+export const dynamic = "force-dynamic";
+
 function formatDateTime(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat("en-PH", {
     timeZone,

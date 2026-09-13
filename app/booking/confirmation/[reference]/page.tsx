@@ -9,6 +9,10 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+// Booking data is per-reference and database-backed; must never be cached
+// or frozen at build time.
+export const dynamic = "force-dynamic";
+
 function formatDateTime(date: Date): string {
   return new Intl.DateTimeFormat("en-PH", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
@@ -57,7 +61,10 @@ export default async function BookingConfirmationPage({ params }: { params: Prom
                 <p>Driver&apos;s licence, a valid government ID, and the deposit card.</p>
 
                 <h4>Cancellation terms</h4>
-                <p>Free cancellation up to 24 hours before pickup. The deposit is refunded after a damage-free return.</p>
+                <p>
+                  Free cancellation up to 24 hours before pickup. The deposit is refunded after a damage-free return.
+                  See the <a href="/cancellation-policy">full cancellation policy</a>.
+                </p>
               </div>
 
               <aside className="booking-summary">

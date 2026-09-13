@@ -9,7 +9,7 @@ import {
 } from "../pricing/quote";
 import { computeBlockWindow, type DbClient } from "./availability.service";
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 const EXCLUSION_VIOLATION_CODE = "23P01";
 

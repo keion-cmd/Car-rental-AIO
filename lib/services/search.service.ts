@@ -10,7 +10,7 @@ import { zonedTimeToUtc } from "../timezone";
 // Pure server-side logic (no rendering) so it can be exercised directly by
 // tests without a browser/component harness.
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 export interface SearchCriteria {
   pickupLocationId: string;

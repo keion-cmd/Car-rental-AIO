@@ -4,7 +4,7 @@ import { PrismaClient } from "@prisma/client";
 // no availability windows, no pricing computation. That logic stays in
 // availability.service.ts / quote.service.ts respectively.
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 export interface CatalogLocation {
   id: string;
@@ -111,6 +111,40 @@ const CATALOG_VEHICLE_SELECT = {
   },
   images: { select: { url: true }, orderBy: { sortOrder: "asc" as const }, take: 1 },
 };
+
+export interface RentalRequirements {
+  minDriverAgeAcrossFleet: number | null;
+  youngDriverMaxAge: number;
+  youngDriverSurchargePerDay: bigint;
+  securityDepositMin: bigint | null;
+  securityDepositMax: bigint | null;
+  billingGraceMinutes: number;
+  currency: string;
+}
+
+// Sourced live from Settings and Vehicle so this never drifts from what the
+// booking flow actually enforces. Only bookable/priced vehicles count toward
+// the deposit range and fleet-wide minimum age — archived/offline/unpriced
+// units aren't rentable, so quoting their values would mislead a reader.
+export async function getRentalRequirements(): Promise<RentalRequirements> {
+  const [settings, ageAgg, depositAgg] = await Promise.all([
+    prisma.settings.findFirst({
+      select: { youngDriverMaxAge: true, youngDriverSurchargePerDay: true, billingGraceMinutes: true, currency: true },
+    }),
+    prisma.vehicle.aggregate({ where: BOOKABLE_PRICED_WHERE, _min: { minDriverAge: true } }),
+    prisma.vehicle.aggregate({ where: BOOKABLE_PRICED_WHERE, _min: { securityDeposit: true }, _max: { securityDeposit: true } }),
+  ]);
+
+  return {
+    minDriverAgeAcrossFleet: ageAgg._min.minDriverAge,
+    youngDriverMaxAge: settings?.youngDriverMaxAge ?? 24,
+    youngDriverSurchargePerDay: settings?.youngDriverSurchargePerDay ?? BigInt(0),
+    securityDepositMin: depositAgg._min.securityDeposit,
+    securityDepositMax: depositAgg._max.securityDeposit,
+    billingGraceMinutes: settings?.billingGraceMinutes ?? 59,
+    currency: settings?.currency ?? "PHP",
+  };
+}
 
 export async function listFeaturedVehicles(limit: number): Promise<CatalogVehicle[]> {
   const rows = await prisma.vehicle.findMany({

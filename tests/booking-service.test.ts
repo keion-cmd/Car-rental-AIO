@@ -2,12 +2,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
-import { isVehicleAvailable, findAvailableVehicles } from "../lib/services/availability.service";
+import { isVehicleAvailable, findAvailableVehicles, prisma as availabilityPrisma } from "../lib/services/availability.service";
 import { createBooking, cancelBooking, getBookingByReference, getDriverLicenceNumber, bookingSteps, prisma as bookingPrisma } from "../lib/services/booking.service";
-import { createQuote, attachCustomerToQuote, releaseExpiredHolds, type CreateQuoteInput } from "../lib/services/quote.service";
+import { createQuote, attachCustomerToQuote, releaseExpiredHolds, type CreateQuoteInput, prisma as quotePrisma } from "../lib/services/quote.service";
 import { quote, type QuoteSettingsInput } from "../lib/pricing/quote";
 import { encryptField, decryptField } from "../lib/crypto/field-encryption";
-import { findOrCreateCustomer } from "../lib/services/customer.service";
+import { findOrCreateCustomer, prisma as customerPrisma } from "../lib/services/customer.service";
 import { createBookingInputSchema } from "../lib/validation/booking";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
@@ -152,6 +152,9 @@ afterAll(async () => {
   await prisma.location.deleteMany({ where: { id: { in: [locNoBuffer, locTurnaround, locOther] } } });
   await prisma.$disconnect();
   await bookingPrisma.$disconnect();
+  await availabilityPrisma.$disconnect();
+  await quotePrisma.$disconnect();
+  await customerPrisma.$disconnect();
 });
 
 describe("availability service", () => {

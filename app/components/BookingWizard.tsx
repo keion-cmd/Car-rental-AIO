@@ -353,7 +353,8 @@ export function BookingWizard({ data, initialStep }: { data: BookingWizardData; 
               </div>
               <label className="booking-terms-check">
                 <input type="checkbox" checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} />
-                I agree to the rental terms and cancellation policy.
+                I agree to the <a href="/terms" target="_blank" rel="noopener noreferrer">rental terms</a> and{" "}
+                <a href="/cancellation-policy" target="_blank" rel="noopener noreferrer">cancellation policy</a>.
               </label>
               {error && <p className="booking-error">{error}</p>}
               <button className="dark-button" type="button" disabled={!termsAccepted} onClick={() => goToStep(4)}>

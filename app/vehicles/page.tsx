@@ -10,6 +10,10 @@ export const metadata: Metadata = {
   description: "Browse every car in the Amihan Car Rentals fleet, grouped by category.",
 };
 
+// Fleet and pricing come from the database and change when an admin changes
+// them, not when the code changes — must not be frozen at build time.
+export const dynamic = "force-dynamic";
+
 export default async function VehiclesPage() {
   const [categories, currency] = await Promise.all([listBrowsableVehiclesByCategory(), getCurrency()]);
 

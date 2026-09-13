@@ -15,7 +15,12 @@ export function createLocalPostgres() {
     password: PASSWORD,
     port: PORT,
     persistent: true,
-    postgresFlags: ["-c", "max_connections=200"],
+    // 300: peak theoretical demand across all 6 test files running together
+    // is ~255 connections (29 PrismaClient pools at the 2*physicalCpus+1
+    // default of 5 each on this 2-core host, plus the 110-max pg.Pool in
+    // vehicle-blocks-availability.test.ts), so 300 keeps ~45 connections of
+    // headroom above worst case.
+    postgresFlags: ["-c", "max_connections=300"],
   });
 }
 

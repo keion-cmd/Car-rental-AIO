@@ -10,7 +10,7 @@ import { PrismaClient, Prisma } from "@prisma/client";
 // would need prep/turnaround), not the pickup location of some other
 // hypothetical request.
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 export type DbClient = PrismaClient | Prisma.TransactionClient;
 

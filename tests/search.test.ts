@@ -2,10 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config as loadEnv } from "dotenv";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
-import { runVehicleSearch, parseSearchParams, type RawSearchParams } from "../lib/services/search.service";
+import { runVehicleSearch, parseSearchParams, type RawSearchParams, prisma as searchPrisma } from "../lib/services/search.service";
 import { zonedTimeToUtc } from "../lib/timezone";
-import { priceRequest } from "../lib/services/quote.service";
-import { listBrowsableVehiclesByCategory } from "../lib/services/catalog.service";
+import { priceRequest, prisma as quotePrisma } from "../lib/services/quote.service";
+import { listBrowsableVehiclesByCategory, prisma as catalogPrisma } from "../lib/services/catalog.service";
+import { prisma as availabilityPrisma } from "../lib/services/availability.service";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env.local") });
 
@@ -111,6 +112,10 @@ afterAll(async () => {
   await prisma.vehicleModel.deleteMany({ where: { id: modelId } });
   await prisma.location.deleteMany({ where: { id: { in: locationIds } } });
   await prisma.$disconnect();
+  await searchPrisma.$disconnect();
+  await quotePrisma.$disconnect();
+  await catalogPrisma.$disconnect();
+  await availabilityPrisma.$disconnect();
 });
 
 describe("search param handling", () => {
