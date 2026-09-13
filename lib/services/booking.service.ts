@@ -260,8 +260,17 @@ export async function cancelBooking(bookingId: string, reason: string): Promise<
 export async function getBookingByReference(reference: string) {
   // driverLicenceNumber is identity-document data — never returned by a
   // public-facing read path, encrypted or not. getDriverLicenceNumber below
-  // is the only function that reads it.
-  return prisma.booking.findUnique({ where: { reference }, omit: { driverLicenceNumber: true } });
+  // is the only function that reads it. vehicle/lineItems are included so
+  // the confirmation page can render the full breakdown without a second
+  // write path or query into bookings.
+  return prisma.booking.findUnique({
+    where: { reference },
+    omit: { driverLicenceNumber: true },
+    include: {
+      lineItems: { orderBy: { sortOrder: "asc" } },
+      vehicle: { include: { model: { include: { category: true } } } },
+    },
+  });
 }
 
 // The ONLY function that decrypts driverLicenceNumber. Kept separate from
