@@ -160,6 +160,8 @@ model User {
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   sessions Session[]
+  checkedOutBookings Booking[] @relation("BookingCheckedOutBy")
+  checkedInBookings  Booking[] @relation("BookingCheckedInBy")
 
   @@map("users")
 }
@@ -414,11 +416,28 @@ model Booking {
   driverFullName       String        @map("driver_full_name")
   driverPhone          String        @map("driver_phone")
   driverEmail          String        @map("driver_email")
+  // Counter check-out/check-in (P5-P2). fuelOut/fuelIn are eighths of a
+  // tank (0-8), not a percentage or float — matches what a fuel gauge
+  // actually shows and avoids rounding disputes when charging for a
+  // refuel. There is deliberately no Vehicle.odometer column: the
+  // vehicle's "current" reading is derived from its own most recent
+  // checked-out/checked-in booking (see getVehicleCurrentOdometer in
+  // booking.service.ts) rather than a denormalized duplicate.
+  odometerOut          Int?          @map("odometer_out")
+  odometerIn           Int?          @map("odometer_in")
+  fuelOut              Int?          @map("fuel_out")
+  fuelIn               Int?          @map("fuel_in")
+  checkedOutAt         DateTime?     @map("checked_out_at") @db.Timestamptz
+  checkedInAt          DateTime?     @map("checked_in_at") @db.Timestamptz
+  checkedOutById       String?       @map("checked_out_by_id") @db.Uuid
+  checkedInById        String?       @map("checked_in_by_id") @db.Uuid
   createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
   customer      Customer          @relation(fields: [customerId], references: [id])
   vehicle       Vehicle           @relation(fields: [vehicleId], references: [id])
+  checkedOutBy  User?             @relation("BookingCheckedOutBy", fields: [checkedOutById], references: [id])
+  checkedInBy   User?             @relation("BookingCheckedInBy", fields: [checkedInById], references: [id])
   lineItems     BookingLineItem[]
   blocks        VehicleBlock[]
   notifications Notification[]
