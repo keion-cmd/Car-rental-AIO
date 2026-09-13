@@ -91,6 +91,30 @@ enum LineItemType {
   EXTRA_CHARGE
 }
 
+enum NotificationType {
+  BOOKING_RECEIVED
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  PICKUP_REMINDER
+  RETURN_REMINDER
+  PAYMENT_RECEIVED
+  ADMIN_NEW_BOOKING
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  IN_APP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
 // ==================== TABLES ====================
 
 model Settings {
@@ -359,10 +383,11 @@ model Booking {
   createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
-  customer  Customer          @relation(fields: [customerId], references: [id])
-  vehicle   Vehicle           @relation(fields: [vehicleId], references: [id])
-  lineItems BookingLineItem[]
-  blocks    VehicleBlock[]
+  customer      Customer          @relation(fields: [customerId], references: [id])
+  vehicle       Vehicle           @relation(fields: [vehicleId], references: [id])
+  lineItems     BookingLineItem[]
+  blocks        VehicleBlock[]
+  notifications Notification[]
 
   @@map("bookings")
 }
@@ -427,4 +452,29 @@ model VehicleBlock {
 
   @@index([bookingId])
   @@map("vehicle_blocks")
+}
+
+model Notification {
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type              NotificationType
+  channel           NotificationChannel
+  recipient         String
+  bookingId         String?             @map("booking_id") @db.Uuid
+  templateKey       String              @map("template_key")
+  // Render variables only (names, dates, amounts as pre-formatted strings,
+  // reference, location details) — NEVER licence numbers, passwords,
+  // tokens, keys, or signed URLs. See lib/notifications/templates.
+  payload           Json
+  status            NotificationStatus  @default(QUEUED)
+  attempts          Int                 @default(0)
+  providerMessageId String?             @map("provider_message_id")
+  error             String?
+  sentAt            DateTime?           @map("sent_at") @db.Timestamptz
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@map("notifications")
 }
