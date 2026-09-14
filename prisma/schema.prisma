@@ -121,66 +121,76 @@ enum NotificationStatus {
   CANCELLED
 }
 
+// A customer is one of these at a time, never several — a set of booleans
+// invites the contradictory state of VIP plus BLACKLISTED. If the business
+// later needs several simultaneously, that is a join table, not more flags.
+enum CustomerFlag {
+  VIP
+  REQUIRES_DEPOSIT
+  BLACKLISTED
+}
+
 // ==================== TABLES ====================
 
 model Settings {
-  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  currency               String   @default("PHP")
-  businessTimezone       String   @default("Asia/Manila") @map("business_timezone")
+  id                         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  currency                   String   @default("PHP")
+  businessTimezone           String   @default("Asia/Manila") @map("business_timezone")
   // Operational time consumed by availability between two bookings on the
   // same vehicle (cleaning, inspection, repositioning). Distinct from
   // billingGraceMinutes below — do not conflate the two.
-  defaultTurnaroundMinutes Int    @default(90) @map("default_turnaround_minutes")
-  taxRateBps                 Int    @default(1200) @map("tax_rate_bps")
-  youngDriverMaxAge           Int    @default(24) @map("young_driver_max_age")
-  youngDriverSurchargePerDay  BigInt @default(0) @map("young_driver_surcharge_per_day")
+  defaultTurnaroundMinutes   Int      @default(90) @map("default_turnaround_minutes")
+  taxRateBps                 Int      @default(1200) @map("tax_rate_bps")
+  youngDriverMaxAge          Int      @default(24) @map("young_driver_max_age")
+  youngDriverSurchargePerDay BigInt   @default(0) @map("young_driver_surcharge_per_day")
   // How long past a 24-hour rental-day boundary a return may occur before
   // another full day is billed. Distinct from defaultTurnaroundMinutes
   // above, which is operational time consumed by availability — conflating
   // the two would corrupt availability. Inherits Settings.currency.
-  billingGraceMinutes         Int    @default(59) @map("billing_grace_minutes")
-  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  billingGraceMinutes        Int      @default(59) @map("billing_grace_minutes")
+  createdAt                  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                  DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   @@map("settings")
 }
 
 model User {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email       String   @unique
-  role        UserRole @default(STAFF)
-  name        String
-  isActive    Boolean  @default(true) @map("is_active")
-  locationIds String[] @default([]) @map("location_ids") @db.Uuid
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email               String    @unique
+  role                UserRole  @default(STAFF)
+  name                String
+  isActive            Boolean   @default(true) @map("is_active")
+  locationIds         String[]  @default([]) @map("location_ids") @db.Uuid
   // scrypt-encoded (salt + hash, see lib/auth/password.ts). No @default —
   // a user without a password is an account anyone can claim.
   passwordHash        String    @map("password_hash")
-  lastLoginAt          DateTime? @map("last_login_at") @db.Timestamptz
-  failedLoginAttempts  Int       @default(0) @map("failed_login_attempts")
-  lockedUntil          DateTime? @map("locked_until") @db.Timestamptz
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
-  sessions Session[]
-  checkedOutBookings Booking[] @relation("BookingCheckedOutBy")
-  checkedInBookings  Booking[] @relation("BookingCheckedInBy")
+  sessions           Session[]
+  checkedOutBookings Booking[]  @relation("BookingCheckedOutBy")
+  checkedInBookings  Booking[]  @relation("BookingCheckedInBy")
+  flaggedCustomers   Customer[]
 
   @@map("users")
 }
 
 model Session {
-  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId       String    @map("user_id") @db.Uuid
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
   // SHA-256 of the raw session token — never the token itself (see
   // lib/auth/session.ts). A leaked database dump must not hand over live
   // sessions.
-  tokenHash    String    @unique @map("token_hash")
-  expiresAt    DateTime  @map("expires_at") @db.Timestamptz
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  lastSeenAt   DateTime  @map("last_seen_at") @db.Timestamptz
-  ipAddress    String?   @map("ip_address")
-  userAgent    String?   @map("user_agent")
-  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  lastSeenAt DateTime  @map("last_seen_at") @db.Timestamptz
+  ipAddress  String?   @map("ip_address")
+  userAgent  String?   @map("user_agent")
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -212,14 +222,14 @@ model Location {
 }
 
 model LocationPair {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  fromLocationId    String   @map("from_location_id") @db.Uuid
-  toLocationId      String   @map("to_location_id") @db.Uuid
-  isAllowed         Boolean  @default(true) @map("is_allowed")
-  feeAmount         BigInt   @default(0) @map("fee_amount")
-  minTransferHours  Int      @default(0) @map("min_transfer_hours")
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fromLocationId   String   @map("from_location_id") @db.Uuid
+  toLocationId     String   @map("to_location_id") @db.Uuid
+  isAllowed        Boolean  @default(true) @map("is_allowed")
+  feeAmount        BigInt   @default(0) @map("fee_amount")
+  minTransferHours Int      @default(0) @map("min_transfer_hours")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   fromLocation Location @relation("FromLocation", fields: [fromLocationId], references: [id])
   toLocation   Location @relation("ToLocation", fields: [toLocationId], references: [id])
@@ -240,15 +250,15 @@ model VehicleCategory {
 }
 
 model VehicleModel {
-  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  categoryId    String              @map("category_id") @db.Uuid
-  make          String
-  model         String
-  seats         Int
-  transmission  VehicleTransmission
-  fuelType      VehicleFuelType     @map("fuel_type")
-  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId   String              @map("category_id") @db.Uuid
+  make         String
+  model        String
+  seats        Int
+  transmission VehicleTransmission
+  fuelType     VehicleFuelType     @map("fuel_type")
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime            @updatedAt @map("updated_at") @db.Timestamptz
 
   category VehicleCategory @relation(fields: [categoryId], references: [id])
   vehicles Vehicle[]
@@ -257,19 +267,19 @@ model VehicleModel {
 }
 
 model Vehicle {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  modelId            String   @map("model_id") @db.Uuid
-  plateNumber        String   @unique @map("plate_number")
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  modelId           String    @map("model_id") @db.Uuid
+  plateNumber       String    @unique @map("plate_number")
   // The label staff say out loud — "V-014" — distinct from the plate.
   // Nullable: existing vehicles have no value and inventing one is worse
   // than leaving it empty. Unique because two cars sharing one is a radio
   // conversation that ends with the wrong car.
-  fleetNumber        String?  @unique @map("fleet_number")
-  year               Int?
-  homeLocationId     String   @map("home_location_id") @db.Uuid
-  currentLocationId  String   @map("current_location_id") @db.Uuid
-  isBookableOnline   Boolean  @default(true) @map("is_bookable_online")
-  archivedAt         DateTime? @map("archived_at") @db.Timestamptz
+  fleetNumber       String?   @unique @map("fleet_number")
+  year              Int?
+  homeLocationId    String    @map("home_location_id") @db.Uuid
+  currentLocationId String    @map("current_location_id") @db.Uuid
+  isBookableOnline  Boolean   @default(true) @map("is_bookable_online")
+  archivedAt        DateTime? @map("archived_at") @db.Timestamptz
   // Rates live on the vehicle, not the model: the product sells a specific
   // car, and two identical units at different branches may price
   // differently. Money columns inherit Settings.currency — this is a
@@ -277,20 +287,20 @@ model Vehicle {
   // Defaulted to 0 (not literal-spec-required-only) so existing non-pricing
   // code paths (e.g. availability tests) that create a Vehicle without
   // pricing data keep working ahead of the pricing engine phase.
-  dailyRate          BigInt   @default(0) @map("daily_rate")
+  dailyRate         BigInt    @default(0) @map("daily_rate")
   // weeklyRate/monthlyRate are PER-PERIOD totals (a whole week, a whole
   // month), not a per-day rate multiplied out. The pricing engine is
   // responsible for the conversion — do not read these as daily rates.
-  weeklyRate         BigInt?  @map("weekly_rate")
-  monthlyRate        BigInt?  @map("monthly_rate")
-  securityDeposit    BigInt   @default(0) @map("security_deposit")
-  includedKmPerDay   Int?     @map("included_km_per_day")
-  extraKmRate        BigInt?  @map("extra_km_rate")
-  minRentalDays      Int      @default(1) @map("min_rental_days")
-  maxRentalDays      Int?     @map("max_rental_days")
-  minDriverAge       Int      @default(21) @map("min_driver_age")
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  weeklyRate        BigInt?   @map("weekly_rate")
+  monthlyRate       BigInt?   @map("monthly_rate")
+  securityDeposit   BigInt    @default(0) @map("security_deposit")
+  includedKmPerDay  Int?      @map("included_km_per_day")
+  extraKmRate       BigInt?   @map("extra_km_rate")
+  minRentalDays     Int       @default(1) @map("min_rental_days")
+  maxRentalDays     Int?      @map("max_rental_days")
+  minDriverAge      Int       @default(21) @map("min_driver_age")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   model           VehicleModel        @relation(fields: [modelId], references: [id])
   homeLocation    Location            @relation("HomeLocation", fields: [homeLocationId], references: [id])
@@ -317,48 +327,59 @@ model VehicleImage {
 }
 
 model Customer {
-  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email       String    @unique
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String        @unique
   name        String
   phone       String?
-  dateOfBirth DateTime? @map("date_of_birth") @db.Timestamptz
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  dateOfBirth DateTime?     @map("date_of_birth") @db.Timestamptz
+  // Internal counter-staff notes — never exposed on any public route, same
+  // convention as Booking.staffNotes.
+  staffNotes  String?       @map("staff_notes")
+  // Nullable, not a boolean set — see CustomerFlag. flagReason is required
+  // whenever flag is set; enforced in customer.service.ts, not here, so it
+  // can return a structured rejection instead of a raw constraint failure.
+  flag        CustomerFlag?
+  flagReason  String?       @map("flag_reason")
+  flaggedAt   DateTime?     @map("flagged_at") @db.Timestamptz
+  flaggedById String?       @map("flagged_by_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
-  quotes   Quote[]
-  bookings Booking[]
+  flaggedBy User?     @relation(fields: [flaggedById], references: [id])
+  quotes    Quote[]
+  bookings  Booking[]
 
   @@map("customers")
 }
 
 model Quote {
-  id                 String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Nullable: a quote is a hold on a vehicle, created when the customer
   // clicks Select — necessarily before any identity is collected. Identity
   // arrives later via attachCustomerToQuote(), or never (an abandoned quote
   // is the normal case, not an error). Booking.customerId stays required —
   // a booking always has a customer.
-  customerId         String?     @map("customer_id") @db.Uuid
-  vehicleId          String      @map("vehicle_id") @db.Uuid
-  pickupLocationId   String      @map("pickup_location_id") @db.Uuid
-  dropoffLocationId  String      @map("dropoff_location_id") @db.Uuid
-  pickupAt           DateTime    @map("pickup_at") @db.Timestamptz
-  returnAt           DateTime    @map("return_at") @db.Timestamptz
+  customerId        String?     @map("customer_id") @db.Uuid
+  vehicleId         String      @map("vehicle_id") @db.Uuid
+  pickupLocationId  String      @map("pickup_location_id") @db.Uuid
+  dropoffLocationId String      @map("dropoff_location_id") @db.Uuid
+  pickupAt          DateTime    @map("pickup_at") @db.Timestamptz
+  returnAt          DateTime    @map("return_at") @db.Timestamptz
   // subtotalAmount/taxAmount/securityDeposit inherit currency from the
   // currency column below — a sibling per field would be redundant.
-  subtotalAmount     BigInt      @default(0) @map("subtotal_amount")
-  taxAmount          BigInt      @default(0) @map("tax_amount")
-  securityDeposit    BigInt      @default(0) @map("security_deposit")
-  rentalDays         Int         @default(1) @map("rental_days")
-  totalAmount        BigInt      @map("total_amount")
-  currency           String      @default("PHP")
-  status             QuoteStatus @default(DRAFT)
+  subtotalAmount    BigInt      @default(0) @map("subtotal_amount")
+  taxAmount         BigInt      @default(0) @map("tax_amount")
+  securityDeposit   BigInt      @default(0) @map("security_deposit")
+  rentalDays        Int         @default(1) @map("rental_days")
+  totalAmount       BigInt      @map("total_amount")
+  currency          String      @default("PHP")
+  status            QuoteStatus @default(DRAFT)
   // Explicit, queryable hold expiry — replaces the prior in-memory 30-minute
   // TTL derived from createdAt. Required: a quote without an expiry cannot
   // back a HOLD block.
-  expiresAt          DateTime    @map("expires_at") @db.Timestamptz
-  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz
+  expiresAt         DateTime    @map("expires_at") @db.Timestamptz
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime    @updatedAt @map("updated_at") @db.Timestamptz
 
   customer   Customer?       @relation(fields: [customerId], references: [id])
   vehicle    Vehicle         @relation(fields: [vehicleId], references: [id])
@@ -388,29 +409,29 @@ model QuoteLineItem {
 }
 
 model Booking {
-  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                   String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // No @default: a booking created without a reference is the same class of
   // bug as a money column silently defaulting to 0. Callers must supply it.
-  reference          String        @unique
-  customerId         String        @map("customer_id") @db.Uuid
-  vehicleId          String        @map("vehicle_id") @db.Uuid
-  pickupLocationId   String        @map("pickup_location_id") @db.Uuid
-  dropoffLocationId  String        @map("dropoff_location_id") @db.Uuid
-  pickupAt           DateTime      @map("pickup_at") @db.Timestamptz
-  returnAt           DateTime      @map("return_at") @db.Timestamptz
+  reference            String        @unique
+  customerId           String        @map("customer_id") @db.Uuid
+  vehicleId            String        @map("vehicle_id") @db.Uuid
+  pickupLocationId     String        @map("pickup_location_id") @db.Uuid
+  dropoffLocationId    String        @map("dropoff_location_id") @db.Uuid
+  pickupAt             DateTime      @map("pickup_at") @db.Timestamptz
+  returnAt             DateTime      @map("return_at") @db.Timestamptz
   // subtotalAmount/taxAmount/securityDeposit inherit currency from the
   // currency column below — a sibling per field would be redundant.
-  subtotalAmount     BigInt        @default(0) @map("subtotal_amount")
-  taxAmount          BigInt        @default(0) @map("tax_amount")
-  securityDeposit    BigInt        @default(0) @map("security_deposit")
-  rentalDays         Int           @default(1) @map("rental_days")
-  totalAmount        BigInt        @map("total_amount")
-  currency           String        @default("PHP")
-  status             BookingStatus @default(PENDING)
-  paymentStatus      PaymentStatus @default(UNPAID) @map("payment_status")
-  source             BookingSource @default(WEBSITE)
-  cancellationReason String?       @map("cancellation_reason")
-  cancelledAt        DateTime?     @map("cancelled_at") @db.Timestamptz
+  subtotalAmount       BigInt        @default(0) @map("subtotal_amount")
+  taxAmount            BigInt        @default(0) @map("tax_amount")
+  securityDeposit      BigInt        @default(0) @map("security_deposit")
+  rentalDays           Int           @default(1) @map("rental_days")
+  totalAmount          BigInt        @map("total_amount")
+  currency             String        @default("PHP")
+  status               BookingStatus @default(PENDING)
+  paymentStatus        PaymentStatus @default(UNPAID) @map("payment_status")
+  source               BookingSource @default(WEBSITE)
+  cancellationReason   String?       @map("cancellation_reason")
+  cancelledAt          DateTime?     @map("cancelled_at") @db.Timestamptz
   // The driver of record, snapshotted at booking time. Distinct from
   // Customer.* because the person who books is not always the person who
   // drives, and because a licence on file must reflect what was true on the
@@ -446,8 +467,8 @@ model Booking {
   // for every existing booking (all UNPAID). Nothing writes this yet
   // (P8 owns that); it makes balanceDue computable instead of null.
   amountPaid           BigInt        @default(0) @map("amount_paid")
-  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime      @updatedAt @map("updated_at") @db.Timestamptz
 
   customer      Customer          @relation(fields: [customerId], references: [id])
   vehicle       Vehicle           @relation(fields: [vehicleId], references: [id])
@@ -497,18 +518,18 @@ model MaintenanceRecord {
 }
 
 model VehicleBlock {
-  id               String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  vehicleId        String                 @map("vehicle_id") @db.Uuid
-  blockType        BlockType              @map("block_type")
+  id               String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vehicleId        String                   @map("vehicle_id") @db.Uuid
+  blockType        BlockType                @map("block_type")
   period           Unsupported("tstzrange")
-  endsAtLocationId String?                @map("ends_at_location_id") @db.Uuid
+  endsAtLocationId String?                  @map("ends_at_location_id") @db.Uuid
   // Nullable — a MAINTENANCE or MANUAL block belongs to neither a booking
   // nor a quote. Cascade: deleting the booking/quote it holds for must not
   // leave an orphan block holding a vehicle hostage.
-  bookingId        String?                @map("booking_id") @db.Uuid
-  quoteId          String?                @map("quote_id") @db.Uuid
-  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+  bookingId        String?                  @map("booking_id") @db.Uuid
+  quoteId          String?                  @map("quote_id") @db.Uuid
+  createdAt        DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
 
   // The exclusion constraint and GiST index are created via raw SQL in
   // prisma/migrations — Prisma cannot express EXCLUDE USING gist.
