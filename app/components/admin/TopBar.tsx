@@ -1,14 +1,17 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ADMIN_NAV_ITEMS } from "../../../lib/admin/nav";
 
 export function TopBar({
   user,
   logoutAction,
+  needsAttentionCount,
 }: {
   user: { name: string; role: string };
   logoutAction: () => void;
+  needsAttentionCount: number;
 }) {
   const pathname = usePathname();
   const current = ADMIN_NAV_ITEMS.find((item) =>
@@ -19,9 +22,14 @@ export function TopBar({
     <header className="admin-topbar">
       <h2 className="admin-topbar-title">{current?.label ?? "Dashboard"}</h2>
       <div className="admin-topbar-actions">
-        <button type="button" className="admin-bell" aria-label="Notifications">
+        <Link
+          href="/admin/bookings?view=needsAttention"
+          className="admin-bell"
+          aria-label={`Notifications: ${needsAttentionCount} needing attention`}
+        >
           🔔
-        </button>
+          {needsAttentionCount > 0 && <span className="admin-bell-count">{needsAttentionCount}</span>}
+        </Link>
         <div className="admin-user-menu">
           <span className="admin-user-name">{user.name}</span>
           <span className="admin-user-role">{user.role}</span>

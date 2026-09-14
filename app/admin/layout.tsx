@@ -5,6 +5,7 @@ import { logoutAction } from "../actions/auth";
 import { ADMIN_NAV_ITEMS } from "../../lib/admin/nav";
 import { Sidebar } from "../components/admin/Sidebar";
 import { TopBar } from "../components/admin/TopBar";
+import { countsForViews } from "../../lib/services/booking-query.service";
 
 export const metadata: Metadata = {
   title: "Dashboard | Amihan Car Rentals",
@@ -26,11 +27,15 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   const user = await requireAuth("STAFF");
   const items = ADMIN_NAV_ITEMS.filter((item) => roleSatisfies(user.role, item.minRole));
 
+  // The bell needs a count on every admin page, not only the overview, so
+  // it is read here rather than passed down from app/admin/page.tsx.
+  const counts = await countsForViews({}, new Date());
+
   return (
     <div className="admin-shell">
       <Sidebar items={items} />
       <div className="admin-main">
-        <TopBar user={{ name: user.name, role: user.role }} logoutAction={logoutAction} />
+        <TopBar user={{ name: user.name, role: user.role }} logoutAction={logoutAction} needsAttentionCount={counts.needsAttention} />
         <div className="admin-content">{children}</div>
       </div>
     </div>
