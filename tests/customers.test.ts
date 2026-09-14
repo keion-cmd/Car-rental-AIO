@@ -566,9 +566,9 @@ describe("security", () => {
     expect((await authorize(staffToken, "MANAGER")).ok).toBe(false);
     expect((await authorize(managerToken, "MANAGER")).ok).toBe(true);
 
-    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/customers/page.tsx"), "utf8");
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/customers/page.tsx"), "utf8");
     expect(source).toContain('requireAuth("MANAGER")');
-    const detailSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/customers/[id]/page.tsx"), "utf8");
+    const detailSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/customers/[id]/page.tsx"), "utf8");
     expect(detailSource).toContain('requireAuth("MANAGER")');
   });
 
@@ -576,7 +576,7 @@ describe("security", () => {
     expect(roleSatisfies("STAFF", "MANAGER")).toBe(false);
     expect(roleSatisfies("MANAGER", "MANAGER")).toBe(true);
 
-    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/bookings/[id]/page.tsx"), "utf8");
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/bookings/[id]/page.tsx"), "utf8");
     expect(source).toContain("canViewCustomerProfile");
     expect(source).toMatch(/canViewCustomerProfile\s*=\s*roleSatisfies\(user\.role,\s*"MANAGER"\)/);
     expect(source).toMatch(/\{canViewCustomerProfile\s*&&/);

@@ -635,7 +635,7 @@ describe("authorisation", () => {
     const outcome = await authorize(undefined, "STAFF");
     expect(outcome.ok).toBe(false);
 
-    const listPageSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/fleet/page.tsx"), "utf8");
+    const listPageSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/fleet/page.tsx"), "utf8");
     expect(listPageSource).toContain('requireAuth("STAFF")');
   });
 

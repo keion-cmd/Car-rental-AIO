@@ -490,8 +490,8 @@ describe("getDashboardSummary: authorisation", () => {
     expect(outcome.ok).toBe(false);
   });
 
-  it('18b. app/admin/page.tsx calls requireAuth("STAFF")', () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/page.tsx"), "utf8");
+  it('18b. app/admin/(authenticated)/page.tsx calls requireAuth("STAFF")', () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/page.tsx"), "utf8");
     expect(source).toContain('requireAuth("STAFF")');
   });
 
@@ -501,8 +501,8 @@ describe("getDashboardSummary: authorisation", () => {
     expect(summary.money).toBeNull();
   });
 
-  it("19b. app/admin/page.tsx gates includeMoney on roleSatisfies(user.role, \"MANAGER\")", () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/page.tsx"), "utf8");
+  it("19b. app/admin/(authenticated)/page.tsx gates includeMoney on roleSatisfies(user.role, \"MANAGER\")", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/page.tsx"), "utf8");
     expect(source).toContain('roleSatisfies(user.role, "MANAGER")');
     expect(source).toContain("getDashboardSummary(now, undefined, canSeeMoney)");
   });

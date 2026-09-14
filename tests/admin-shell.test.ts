@@ -39,18 +39,18 @@ afterAll(async () => {
 // Maps a nav route to the page.tsx file that implements it, for the
 // requireAuth-presence check in the last describe block below.
 const ROUTE_FILES: Record<string, string> = {
-  "/admin": "app/admin/page.tsx",
-  "/admin/bookings": "app/admin/bookings/page.tsx",
-  "/admin/calendar": "app/admin/calendar/page.tsx",
-  "/admin/fleet": "app/admin/fleet/page.tsx",
-  "/admin/customers": "app/admin/customers/page.tsx",
-  "/admin/payments": "app/admin/payments/page.tsx",
-  "/admin/reports": "app/admin/reports/page.tsx",
-  "/admin/locations": "app/admin/locations/page.tsx",
-  "/admin/pricing": "app/admin/pricing/page.tsx",
-  "/admin/cms": "app/admin/cms/page.tsx",
-  "/admin/settings": "app/admin/settings/page.tsx",
-  "/admin/audit": "app/admin/audit/page.tsx",
+  "/admin": "app/admin/(authenticated)/page.tsx",
+  "/admin/bookings": "app/admin/(authenticated)/bookings/page.tsx",
+  "/admin/calendar": "app/admin/(authenticated)/calendar/page.tsx",
+  "/admin/fleet": "app/admin/(authenticated)/fleet/page.tsx",
+  "/admin/customers": "app/admin/(authenticated)/customers/page.tsx",
+  "/admin/payments": "app/admin/(authenticated)/payments/page.tsx",
+  "/admin/reports": "app/admin/(authenticated)/reports/page.tsx",
+  "/admin/locations": "app/admin/(authenticated)/locations/page.tsx",
+  "/admin/pricing": "app/admin/(authenticated)/pricing/page.tsx",
+  "/admin/cms": "app/admin/(authenticated)/cms/page.tsx",
+  "/admin/settings": "app/admin/(authenticated)/settings/page.tsx",
+  "/admin/audit": "app/admin/(authenticated)/audit/page.tsx",
 };
 
 describe("admin shell: nav config covers all 12 routes", () => {
@@ -96,8 +96,18 @@ describe("admin shell: every route file calls requireAuth", () => {
     });
   }
 
-  it("5. app/admin/layout.tsx also calls requireAuth(\"STAFF\") as the outer gate", () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/layout.tsx"), "utf8");
+  it("5. app/admin/(authenticated)/layout.tsx also calls requireAuth(\"STAFF\") as the outer gate", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/layout.tsx"), "utf8");
     expect(source).toContain('requireAuth("STAFF")');
+  });
+
+  it("6. app/admin/login/page.tsx is NOT guarded by requireAuth — it must render for unauthenticated visitors", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "app/admin/login/page.tsx"), "utf8");
+    expect(source).not.toMatch(/requireAuth\(/);
+  });
+
+  it("7. app/admin/login/page.tsx sits outside the (authenticated) route group that carries the requireAuth layout gate", () => {
+    expect(fs.existsSync(path.resolve(process.cwd(), "app/admin/(authenticated)/login"))).toBe(false);
+    expect(fs.existsSync(path.resolve(process.cwd(), "app/admin/login/page.tsx"))).toBe(true);
   });
 });

@@ -397,8 +397,8 @@ describe("security: driver licence number never leaks", () => {
 
 describe("authorisation", () => {
   it("18. /admin/bookings and /admin/bookings/[id] require STAFF", () => {
-    const listSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/bookings/page.tsx"), "utf8");
-    const detailSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/bookings/[id]/page.tsx"), "utf8");
+    const listSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/bookings/page.tsx"), "utf8");
+    const detailSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/bookings/[id]/page.tsx"), "utf8");
     expect(listSource).toContain('requireAuth("STAFF")');
     expect(detailSource).toContain('requireAuth("STAFF")');
   });

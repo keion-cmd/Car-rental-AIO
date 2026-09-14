@@ -490,7 +490,7 @@ describe("authorisation", () => {
     const outcome = await authorize(undefined, "STAFF");
     expect(outcome.ok).toBe(false);
 
-    const pageSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/calendar/page.tsx"), "utf8");
+    const pageSource = fs.readFileSync(path.resolve(process.cwd(), "app/admin/(authenticated)/calendar/page.tsx"), "utf8");
     expect(pageSource).toContain('requireAuth("STAFF")');
   });
 });
