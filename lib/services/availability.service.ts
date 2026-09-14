@@ -21,7 +21,7 @@ export interface AvailabilityFilters {
   minSeats?: number;
 }
 
-interface Buffers {
+export interface Buffers {
   prepMinutes: number;
   turnaroundMinutes: number;
 }
@@ -38,7 +38,11 @@ async function resolveBuffersForLocation(db: DbClient, locationId: string): Prom
   return { prepMinutes: 0, turnaroundMinutes: settings?.defaultTurnaroundMinutes ?? 90 };
 }
 
-function expandWindow(pickupAt: Date, returnAt: Date, buffers: Buffers): { start: Date; end: Date } {
+// Exported so fleet.service's batched status derivation can expand a window
+// per vehicle from buffers it already fetched in bulk, without either
+// reimplementing this arithmetic or paying resolveBuffersForLocation's
+// one-location-at-a-time DB round trip per vehicle.
+export function expandWindow(pickupAt: Date, returnAt: Date, buffers: Buffers): { start: Date; end: Date } {
   const start = new Date(pickupAt.getTime() - buffers.prepMinutes * 60_000);
   const end = new Date(returnAt.getTime() + buffers.turnaroundMinutes * 60_000);
   return { start, end };

@@ -1,13 +1,14 @@
 import { PrismaClient, Prisma, type BookingStatus, type MaintenanceType } from "@prisma/client";
-import { isVehicleAvailable, computeBlockWindow, type DbClient } from "./availability.service";
+import { expandWindow, type DbClient, type Buffers } from "./availability.service";
 import { listLocations } from "./catalog.service";
 
 // Fleet management writes: the first write path vehicles have ever had
-// (previously seed-only). Live availability status is always derived via
-// availability.service's isVehicleAvailable/computeBlockWindow — this file
-// never reimplements overlap or buffer math, it only reads vehicle_blocks
-// to explain WHY a vehicle that isVehicleAvailable already said "no" is
-// unavailable (maintenance vs. an active rental vs. a manual hold).
+// (previously seed-only). Live availability status is derived entirely in
+// this file's deriveVehicleStatuses — this file never reimplements the
+// overlap/buffer math itself (expandWindow is reused from
+// availability.service), it only reads vehicle_blocks to explain WHY a
+// vehicle is unavailable (maintenance vs. an active rental vs. a manual
+// hold).
 
 export const prisma = new PrismaClient();
 
@@ -28,45 +29,100 @@ export type VehicleStatus = "AVAILABLE" | "RENTED" | "RESERVED" | "MAINTENANCE" 
 // prisma/migrations/20260912113700_vehicle_blocks_no_overlap) covers every
 // block_type for a given vehicle_id, so at most one block can cover a given
 // instant — there is never an ambiguous "which block wins" case here.
+//
+// This is the ONLY place status precedence is decided (MAINTENANCE block ->
+// MAINTENANCE; BOOKING block -> RENTED if ONGOING else RESERVED; MANUAL,
+// TRANSFER or unexpired HOLD -> BLOCKED; no covering block -> AVAILABLE).
+// Every vehicle's window is expanded from its OWN current location's
+// buffers, computed once here via a bulk location lookup rather than one
+// resolveBuffersForLocation() round trip per vehicle. Cost is 3 queries
+// (vehicles, locations, blocks) independent of how many ids are supplied.
+export async function deriveVehicleStatuses(
+  vehicleIds: string[],
+  now: Date,
+  db: DbClient = prisma
+): Promise<Map<string, VehicleStatus>> {
+  const statusMap = new Map<string, VehicleStatus>();
+  if (vehicleIds.length === 0) {
+    return statusMap;
+  }
+
+  const vehicles = await db.vehicle.findMany({
+    where: { id: { in: vehicleIds } },
+    select: { id: true, currentLocationId: true },
+  });
+  if (vehicles.length === 0) {
+    return statusMap;
+  }
+
+  const locationIds = [...new Set(vehicles.map((v) => v.currentLocationId))];
+  const locationRows = await db.location.findMany({
+    where: { id: { in: locationIds } },
+    select: { id: true, prepMinutes: true, turnaroundMinutes: true },
+  });
+  const buffersByLocation = new Map<string, Buffers>(
+    locationRows.map((l) => [l.id, { prepMinutes: l.prepMinutes, turnaroundMinutes: l.turnaroundMinutes }])
+  );
+
+  const ids: string[] = [];
+  const starts: string[] = [];
+  const ends: string[] = [];
+  for (const v of vehicles) {
+    statusMap.set(v.id, "AVAILABLE");
+    const buffers = buffersByLocation.get(v.currentLocationId) ?? { prepMinutes: 0, turnaroundMinutes: 90 };
+    const { start, end } = expandWindow(now, now, buffers);
+    ids.push(v.id);
+    starts.push(start.toISOString());
+    ends.push(end.toISOString());
+  }
+
+  // Same HOLD-expiry filter fragment as isVehicleAvailable /
+  // getFleetCalendar, copied verbatim — not rewritten. UNNEST pairs each
+  // vehicle with its own window so the per-location buffer difference is
+  // resolved before this single query, not inside it.
+  const rows = await db.$queryRaw<Array<{ vehicle_id: string; block_type: string; booking_status: BookingStatus | null }>>`
+    SELECT DISTINCT ON (w.vehicle_id) w.vehicle_id, vb.block_type, b.status AS booking_status
+    FROM UNNEST(${ids}::uuid[], ${starts}::timestamptz[], ${ends}::timestamptz[]) AS w(vehicle_id, start_at, end_at)
+    JOIN vehicle_blocks vb
+      ON vb.vehicle_id = w.vehicle_id
+      AND vb.period && tstzrange(w.start_at, w.end_at, '[)')
+      AND NOT (
+        vb.block_type = 'HOLD'::"BlockType"
+        AND EXISTS (SELECT 1 FROM quotes q WHERE q.id = vb.quote_id AND q.expires_at < now())
+      )
+    LEFT JOIN bookings b ON b.id = vb.booking_id
+    ORDER BY w.vehicle_id
+  `;
+
+  for (const row of rows) {
+    let status: VehicleStatus;
+    if (row.block_type === "MAINTENANCE") {
+      status = "MAINTENANCE";
+    } else if (row.block_type === "BOOKING") {
+      status = row.booking_status === "ONGOING" ? "RENTED" : "RESERVED";
+    } else {
+      status = "BLOCKED"; // MANUAL, TRANSFER, or an unexpired HOLD
+    }
+    statusMap.set(row.vehicle_id, status);
+  }
+
+  return statusMap;
+}
+
+// Single-vehicle callers keep this signature, but the batch of size one is
+// the only implementation — there is no second copy of status precedence.
+// currentLocationId is no longer read here: the batch resolves it itself
+// from a bulk vehicle/location lookup, kept as a parameter only so existing
+// call sites don't need to change.
 export async function deriveVehicleStatus(
   vehicleId: string,
   currentLocationId: string,
   now: Date,
   db: DbClient = prisma
 ): Promise<VehicleStatus> {
-  const available = await isVehicleAvailable(vehicleId, now, now, db);
-  if (available) {
-    return "AVAILABLE";
-  }
-
-  const { start, end } = await computeBlockWindow(db, currentLocationId, now, now);
-  const rows = await db.$queryRaw<Array<{ block_type: string; booking_status: BookingStatus | null }>>`
-    SELECT vb.block_type, b.status AS booking_status
-    FROM vehicle_blocks vb
-    LEFT JOIN bookings b ON b.id = vb.booking_id
-    WHERE vb.vehicle_id = ${vehicleId}::uuid
-    AND vb.period && tstzrange(${start}::timestamptz, ${end}::timestamptz, '[)')
-    AND NOT (
-      vb.block_type = 'HOLD'::"BlockType"
-      AND EXISTS (SELECT 1 FROM quotes q WHERE q.id = vb.quote_id AND q.expires_at < now())
-    )
-    LIMIT 1
-  `;
-
-  const block = rows[0];
-  if (!block) {
-    // Defensive only: isVehicleAvailable said unavailable but no covering
-    // block was found under the identical window/filter — should not
-    // happen given the shared exclusion constraint.
-    return "BLOCKED";
-  }
-  if (block.block_type === "MAINTENANCE") {
-    return "MAINTENANCE";
-  }
-  if (block.block_type === "BOOKING") {
-    return block.booking_status === "ONGOING" ? "RENTED" : "RESERVED";
-  }
-  return "BLOCKED"; // MANUAL, TRANSFER, or an unexpired HOLD
+  void currentLocationId;
+  const statuses = await deriveVehicleStatuses([vehicleId], now, db);
+  return statuses.get(vehicleId) ?? "AVAILABLE";
 }
 
 // ==================== LIST / DETAIL (READ) ====================
@@ -140,16 +196,26 @@ export async function listVehicles(
 
   const locations = new Map((await listLocations()).map((l) => [l.id, l]));
 
+  const vehicleIds = vehicles.map((v) => v.id);
+  const statusById = await deriveVehicleStatuses(vehicleIds, now, db);
+
+  // One query for the next PENDING/CONFIRMED booking of every vehicle in
+  // the result set, ordered by pickupAt so the first row seen per vehicleId
+  // is its earliest — same N+1 fix as the status derivation above.
+  const upcomingBookings = await db.booking.findMany({
+    where: { vehicleId: { in: vehicleIds }, status: { in: ["PENDING", "CONFIRMED"] }, pickupAt: { gte: now } },
+    orderBy: { pickupAt: "asc" },
+    select: { vehicleId: true, pickupAt: true },
+  });
+  const nextBookingById = new Map<string, Date>();
+  for (const b of upcomingBookings) {
+    if (!nextBookingById.has(b.vehicleId)) nextBookingById.set(b.vehicleId, b.pickupAt);
+  }
+
   const rows: FleetListRow[] = [];
   for (const v of vehicles) {
-    const status = await deriveVehicleStatus(v.id, v.currentLocationId, now, db);
+    const status = statusById.get(v.id) ?? "AVAILABLE";
     if (filters.status && status !== filters.status) continue;
-
-    const nextBooking = await db.booking.findFirst({
-      where: { vehicleId: v.id, status: { in: ["PENDING", "CONFIRMED"] }, pickupAt: { gte: now } },
-      orderBy: { pickupAt: "asc" },
-      select: { pickupAt: true },
-    });
 
     rows.push({
       id: v.id,
@@ -167,7 +233,7 @@ export async function listVehicles(
       currentLocationId: v.currentLocationId,
       currentLocationName: locations.get(v.currentLocationId)?.name ?? "Unknown location",
       dailyRate: v.dailyRate,
-      nextBookingAt: nextBooking?.pickupAt ?? null,
+      nextBookingAt: nextBookingById.get(v.id) ?? null,
     });
   }
   return rows;

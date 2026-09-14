@@ -18,6 +18,8 @@ import {
   addVehicleImage,
   removeVehicleImage,
   setPrimaryImage,
+  deriveVehicleStatus,
+  deriveVehicleStatuses,
   prisma as fleetPrisma,
 } from "../lib/services/fleet.service";
 import { computeBlockWindow, prisma as availabilityPrisma } from "../lib/services/availability.service";
@@ -40,6 +42,7 @@ let locationId: string;
 const vehicleIds: string[] = [];
 const bookingIds: string[] = [];
 const maintenanceIds: string[] = [];
+const quoteIds: string[] = [];
 
 function futureDate(iso: string): Date {
   return new Date(iso);
@@ -96,7 +99,7 @@ async function createTestBooking(overrides: {
   return booking;
 }
 
-async function insertRawBlock(vehicleId: string, blockType: string, start: string, end: string, bookingId?: string) {
+async function insertRawBlock(vehicleId: string, blockType: string, start: string, end: string, bookingId?: string, quoteId?: string) {
   if (bookingId) {
     await prisma.$executeRawUnsafe(
       `INSERT INTO vehicle_blocks (vehicle_id, block_type, period, booking_id, updated_at)
@@ -106,6 +109,16 @@ async function insertRawBlock(vehicleId: string, blockType: string, start: strin
       start,
       end,
       bookingId
+    );
+  } else if (quoteId) {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO vehicle_blocks (vehicle_id, block_type, period, quote_id, updated_at)
+       VALUES ($1::uuid, $2::"BlockType", tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5::uuid, now())`,
+      vehicleId,
+      blockType,
+      start,
+      end,
+      quoteId
     );
   } else {
     await prisma.$executeRawUnsafe(
@@ -117,6 +130,22 @@ async function insertRawBlock(vehicleId: string, blockType: string, start: strin
       end
     );
   }
+}
+
+async function createTestQuote(overrides: { vehicleId: string; pickupAt: Date; returnAt: Date; expiresAt: Date }) {
+  const quote = await prisma.quote.create({
+    data: {
+      vehicleId: overrides.vehicleId,
+      pickupLocationId: locationId,
+      dropoffLocationId: locationId,
+      pickupAt: overrides.pickupAt,
+      returnAt: overrides.returnAt,
+      totalAmount: BigInt(168000),
+      expiresAt: overrides.expiresAt,
+    },
+  });
+  quoteIds.push(quote.id);
+  return quote;
 }
 
 beforeAll(async () => {
@@ -162,6 +191,7 @@ afterAll(async () => {
   await prisma.maintenanceRecord.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.bookingLineItem.deleteMany({ where: { booking: { vehicleId: { in: vehicleIds } } } });
   await prisma.vehicleBlock.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
+  await prisma.quote.deleteMany({ where: { id: { in: quoteIds } } });
   await prisma.booking.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.vehicleImage.deleteMany({ where: { vehicleId: { in: vehicleIds } } });
   await prisma.vehicle.deleteMany({ where: { id: { in: vehicleIds } } });
@@ -707,5 +737,227 @@ describe("calendar timezone (P5-P4B)", () => {
         await prisma.settings.updateMany({ data: { businessTimezone: originalTimezone } });
       }
     }
+  });
+});
+
+// P5-P6A — same spy-and-count method calendar.test.ts's test 11 used, widened
+// to every query kind deriveVehicleStatuses/listVehicles issue on the fleet
+// prisma client (there is no single "$queryRaw only" story here, since the
+// batch also uses ORM findMany calls for vehicles/locations/bookings).
+function spyOnFleetQueries() {
+  const spies = [
+    vi.spyOn(fleetPrisma, "$queryRaw"),
+    vi.spyOn(fleetPrisma.vehicle, "findMany"),
+    vi.spyOn(fleetPrisma.location, "findMany"),
+    vi.spyOn(fleetPrisma.booking, "findMany"),
+  ];
+  return {
+    count: () => spies.reduce((sum, s) => sum + s.mock.calls.length, 0),
+    restore: () => spies.forEach((s) => s.mockRestore()),
+  };
+}
+
+describe("batched vehicle status derivation (P5-P6A)", () => {
+  it("P5-P6A-1. a vehicle with no blocks returns AVAILABLE", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-01T00:00:00Z");
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("AVAILABLE");
+  });
+
+  it("P5-P6A-2. a vehicle with an ONGOING booking returns RENTED", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-02T12:00:00Z");
+    const booking = await createTestBooking({
+      vehicleId: vehicle.id,
+      status: "ONGOING",
+      pickupAt: futureDate("2034-01-02T00:00:00Z"),
+      returnAt: futureDate("2034-01-03T00:00:00Z"),
+    });
+    await insertRawBlock(vehicle.id, "BOOKING", "2034-01-02T00:00:00Z", "2034-01-03T01:00:00Z", booking.id);
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("RENTED");
+  });
+
+  it("P5-P6A-3. a vehicle with a future CONFIRMED booking covering `now` returns RESERVED", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-05T00:00:00Z");
+    const pickupAt = futureDate("2034-01-05T00:30:00Z");
+    const returnAt = futureDate("2034-01-06T00:30:00Z");
+    const booking = await createTestBooking({ vehicleId: vehicle.id, status: "CONFIRMED", pickupAt, returnAt });
+    const { start, end } = await computeBlockWindow(prisma, locationId, pickupAt, returnAt);
+    await insertRawBlock(vehicle.id, "BOOKING", start.toISOString(), end.toISOString(), booking.id);
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("RESERVED");
+  });
+
+  it("P5-P6A-4. a vehicle in a maintenance window returns MAINTENANCE", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-10T12:00:00Z");
+    await insertRawBlock(vehicle.id, "MAINTENANCE", "2034-01-10T00:00:00Z", "2034-01-11T00:00:00Z");
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("MAINTENANCE");
+  });
+
+  it("P5-P6A-5. a vehicle with a MANUAL block returns BLOCKED", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-15T06:00:00Z");
+    await insertRawBlock(vehicle.id, "MANUAL", "2034-01-15T00:00:00Z", "2034-01-16T00:00:00Z");
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("BLOCKED");
+  });
+
+  it("P5-P6A-6. a vehicle with an unexpired HOLD returns BLOCKED", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-20T06:00:00Z");
+    const quote = await createTestQuote({
+      vehicleId: vehicle.id,
+      pickupAt: futureDate("2034-01-20T00:00:00Z"),
+      returnAt: futureDate("2034-01-21T00:00:00Z"),
+      expiresAt: futureDate("2099-01-01T00:00:00Z"),
+    });
+    await insertRawBlock(vehicle.id, "HOLD", "2034-01-20T00:00:00Z", "2034-01-21T00:00:00Z", undefined, quote.id);
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("BLOCKED");
+  });
+
+  it("P5-P6A-7. a vehicle with an EXPIRED hold returns AVAILABLE", async () => {
+    const vehicle = await createTestVehicle();
+    const now = futureDate("2034-01-25T06:00:00Z");
+    const quote = await createTestQuote({
+      vehicleId: vehicle.id,
+      pickupAt: futureDate("2034-01-25T00:00:00Z"),
+      returnAt: futureDate("2034-01-26T00:00:00Z"),
+      // Compared against Postgres's real now(), not the caller-supplied
+      // `now` — must be genuinely in the past.
+      expiresAt: futureDate("2020-01-01T00:00:00Z"),
+    });
+    await insertRawBlock(vehicle.id, "HOLD", "2034-01-25T00:00:00Z", "2034-01-26T00:00:00Z", undefined, quote.id);
+
+    const statuses = await deriveVehicleStatuses([vehicle.id], now);
+    expect(statuses.get(vehicle.id)).toBe("AVAILABLE");
+  });
+
+  it("P5-P6A-8. a mixed set of six vehicles, one in each state, all resolve correctly in a single call", async () => {
+    const now = futureDate("2034-02-01T12:00:00Z");
+
+    const vAvailable = await createTestVehicle();
+
+    const vRented = await createTestVehicle();
+    const rentedBooking = await createTestBooking({
+      vehicleId: vRented.id,
+      status: "ONGOING",
+      pickupAt: futureDate("2034-02-01T00:00:00Z"),
+      returnAt: futureDate("2034-02-02T00:00:00Z"),
+    });
+    await insertRawBlock(vRented.id, "BOOKING", "2034-02-01T00:00:00Z", "2034-02-02T01:00:00Z", rentedBooking.id);
+
+    const vReserved = await createTestVehicle();
+    const reservedPickup = futureDate("2034-02-01T12:30:00Z");
+    const reservedReturn = futureDate("2034-02-02T12:30:00Z");
+    const reservedBooking = await createTestBooking({ vehicleId: vReserved.id, status: "CONFIRMED", pickupAt: reservedPickup, returnAt: reservedReturn });
+    const reservedWindow = await computeBlockWindow(prisma, locationId, reservedPickup, reservedReturn);
+    await insertRawBlock(vReserved.id, "BOOKING", reservedWindow.start.toISOString(), reservedWindow.end.toISOString(), reservedBooking.id);
+
+    const vMaintenance = await createTestVehicle();
+    await insertRawBlock(vMaintenance.id, "MAINTENANCE", "2034-02-01T00:00:00Z", "2034-02-02T00:00:00Z");
+
+    const vBlockedManual = await createTestVehicle();
+    await insertRawBlock(vBlockedManual.id, "MANUAL", "2034-02-01T00:00:00Z", "2034-02-02T00:00:00Z");
+
+    const vBlockedHold = await createTestVehicle();
+    const holdQuote = await createTestQuote({
+      vehicleId: vBlockedHold.id,
+      pickupAt: futureDate("2034-02-01T00:00:00Z"),
+      returnAt: futureDate("2034-02-02T00:00:00Z"),
+      expiresAt: futureDate("2099-01-01T00:00:00Z"),
+    });
+    await insertRawBlock(vBlockedHold.id, "HOLD", "2034-02-01T00:00:00Z", "2034-02-02T00:00:00Z", undefined, holdQuote.id);
+
+    const ids = [vAvailable.id, vRented.id, vReserved.id, vMaintenance.id, vBlockedManual.id, vBlockedHold.id];
+    const statuses = await deriveVehicleStatuses(ids, now);
+
+    expect(statuses.get(vAvailable.id)).toBe("AVAILABLE");
+    expect(statuses.get(vRented.id)).toBe("RENTED");
+    expect(statuses.get(vReserved.id)).toBe("RESERVED");
+    expect(statuses.get(vMaintenance.id)).toBe("MAINTENANCE");
+    expect(statuses.get(vBlockedManual.id)).toBe("BLOCKED");
+    expect(statuses.get(vBlockedHold.id)).toBe("BLOCKED");
+  });
+
+  it("P5-P6A-9. an empty id array returns an empty map without querying", async () => {
+    const counter = spyOnFleetQueries();
+    const statuses = await deriveVehicleStatuses([], new Date());
+    const count = counter.count();
+    counter.restore();
+
+    expect(statuses.size).toBe(0);
+    expect(count).toBe(0);
+  });
+
+  it("P5-P6A-10. an id that does not exist is absent from the map, not thrown on", async () => {
+    const nonExistentId = "00000000-0000-0000-0000-000000000000";
+    const statuses = await deriveVehicleStatuses([nonExistentId], new Date());
+    expect(statuses.has(nonExistentId)).toBe(false);
+  });
+
+  it("P5-P6A-11. deriveVehicleStatuses agrees with deriveVehicleStatus for every vehicle in the seeded fleet", async () => {
+    const activeVehicles = await prisma.vehicle.findMany({
+      where: { archivedAt: null },
+      select: { id: true, currentLocationId: true },
+    });
+    const now = new Date();
+    const ids = activeVehicles.map((v) => v.id);
+    const batched = await deriveVehicleStatuses(ids, now);
+
+    for (const v of activeVehicles) {
+      const single = await deriveVehicleStatus(v.id, v.currentLocationId, now);
+      expect(batched.get(v.id)).toBe(single);
+    }
+  });
+
+  it("P5-P6A-12. deriveVehicleStatuses over the entire seeded fleet issues no more than 3 queries", async () => {
+    const activeVehicles = await prisma.vehicle.findMany({ where: { archivedAt: null }, select: { id: true } });
+    const ids = activeVehicles.map((v) => v.id);
+
+    const counter = spyOnFleetQueries();
+    await deriveVehicleStatuses(ids, new Date());
+    const count = counter.count();
+    counter.restore();
+
+    // Reported in the phase's final report: actual query count vs. vehicle count.
+    expect(count).toBeLessThanOrEqual(3);
+  });
+
+  it("P5-P6A-13. listVehicles({}, now) over the entire seeded fleet issues no more than 6 queries", async () => {
+    const counter = spyOnFleetQueries();
+    const rows = await listVehicles({}, new Date());
+    const count = counter.count();
+    counter.restore();
+
+    expect(rows.length).toBeGreaterThan(0);
+    expect(count).toBeLessThanOrEqual(6);
+  });
+
+  it("P5-P6A-14. the query count for deriveVehicleStatuses does not grow with the number of vehicles", async () => {
+    const activeVehicles = await prisma.vehicle.findMany({ where: { archivedAt: null }, select: { id: true } });
+    const allIds = activeVehicles.map((v) => v.id);
+
+    const counterOne = spyOnFleetQueries();
+    await deriveVehicleStatuses([allIds[0]], new Date());
+    const countAtOne = counterOne.count();
+    counterOne.restore();
+
+    const counterAll = spyOnFleetQueries();
+    await deriveVehicleStatuses(allIds, new Date());
+    const countAtAll = counterAll.count();
+    counterAll.restore();
+
+    expect(countAtOne).toBe(countAtAll);
   });
 });
