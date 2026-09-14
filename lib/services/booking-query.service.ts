@@ -1,4 +1,4 @@
-import { PrismaClient, type Booking, type BookingStatus, type PaymentStatus } from "@prisma/client";
+import { PrismaClient, type Booking, type BookingStatus, type PaymentStatus, type CustomerFlag } from "@prisma/client";
 import { listLocations, type CatalogLocation } from "./catalog.service";
 
 // Read-only queries behind the staff bookings list/detail screens. Never
@@ -302,7 +302,10 @@ export interface BookingDetail extends BookingFlags {
   returnAt: Date;
   pickupLocation: CatalogLocation | null;
   dropoffLocation: CatalogLocation | null;
-  customer: { id: string; name: string; email: string; phone: string | null };
+  // flag: shown as a badge on the booking detail screen — REQUIRES_DEPOSIT
+  // prominently. The customer LINK itself is gated to MANAGER+ by the page,
+  // not by this query.
+  customer: { id: string; name: string; email: string; phone: string | null; flag: CustomerFlag | null };
   vehicle: { id: string; plateNumber: string; make: string; model: string };
   subtotalAmount: bigint;
   taxAmount: bigint;
@@ -352,7 +355,7 @@ export async function getBookingDetail(id: string, now: Date = new Date()): Prom
       where: { id },
       omit: { driverLicenceNumber: true },
       include: {
-        customer: { select: { id: true, name: true, email: true, phone: true } },
+        customer: { select: { id: true, name: true, email: true, phone: true, flag: true } },
         vehicle: { select: { id: true, plateNumber: true, model: { select: { make: true, model: true } } } },
         lineItems: { orderBy: { sortOrder: "asc" } },
       },

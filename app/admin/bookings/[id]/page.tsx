@@ -30,6 +30,18 @@ const ERROR_MESSAGES: Record<string, string> = {
   "already-cancelled": "This booking is already cancelled.",
 };
 
+const CUSTOMER_FLAG_LABEL: Record<string, string> = {
+  VIP: "VIP",
+  REQUIRES_DEPOSIT: "Requires deposit",
+  BLACKLISTED: "Blacklisted",
+};
+
+const CUSTOMER_FLAG_CLASS: Record<string, string> = {
+  VIP: "admin-badge-blue",
+  REQUIRES_DEPOSIT: "admin-badge-amber",
+  BLACKLISTED: "admin-badge-red",
+};
+
 export default async function AdminBookingDetailPage({
   params,
   searchParams,
@@ -49,6 +61,7 @@ export default async function AdminBookingDetailPage({
 
   const canCancel = roleSatisfies(user.role, "MANAGER") && detail.status !== "CANCELLED";
   const canEditNotes = roleSatisfies(user.role, "MANAGER");
+  const canViewCustomerProfile = roleSatisfies(user.role, "MANAGER");
   const pickupTz = detail.pickupLocation?.timezone ?? "UTC";
 
   // The primary action always reflects the next legal transition — CONFIRMED
@@ -109,6 +122,14 @@ export default async function AdminBookingDetailPage({
 
         <Card>
           <h2>Customer</h2>
+          {detail.customer.flag && (
+            <span className={`admin-badge ${CUSTOMER_FLAG_CLASS[detail.customer.flag]}`} style={{ marginBottom: 10, display: "inline-block" }}>
+              {CUSTOMER_FLAG_LABEL[detail.customer.flag]}
+            </span>
+          )}
+          {detail.customer.flag === "REQUIRES_DEPOSIT" && (
+            <div><span className="admin-flag admin-flag-attention">Collect a deposit before handing over the keys</span></div>
+          )}
           <dl className="admin-dl">
             <dt>Name</dt>
             <dd>{detail.customer.name}</dd>
@@ -117,6 +138,11 @@ export default async function AdminBookingDetailPage({
             <dt>Phone</dt>
             <dd>{detail.customer.phone ?? "—"}</dd>
           </dl>
+          {/* Customer PII lives behind MANAGER — a STAFF session viewing this
+              booking must not see the profile link. */}
+          {canViewCustomerProfile && (
+            <Link href={`/admin/customers/${detail.customer.id}`} className="outline-button">View customer profile</Link>
+          )}
         </Card>
 
         <Card>

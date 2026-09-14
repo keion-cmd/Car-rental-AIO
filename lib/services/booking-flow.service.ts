@@ -10,7 +10,7 @@ import {
   type CreateQuoteOutcome,
   type PriceRequestRejectionReason,
 } from "./quote.service";
-import { findOrCreateCustomer } from "./customer.service";
+import { findOrCreateCustomer, isCustomerBlocked } from "./customer.service";
 import { assumedDriverDateOfBirth } from "./search.service";
 import { validateDriverLicence, type DriverLicenceRejectionReason } from "../validation/booking";
 import type { QuoteResult } from "../pricing/quote";
@@ -134,7 +134,13 @@ export interface SubmitBookingInput {
   driverLicenceExpiry: Date;
 }
 
-export type SubmitBookingOutcome = CreateBookingOutcome | { ok: false; reason: "QUOTE_NOT_FOUND" };
+export type SubmitBookingOutcome =
+  | CreateBookingOutcome
+  | { ok: false; reason: "QUOTE_NOT_FOUND" }
+  // Internal reason only — the public checkout UI must show a generic
+  // failure, not this. See app/actions/booking-flow.ts for the mapping.
+  // Staff-facing screens may show it verbatim.
+  | { ok: false; reason: "CUSTOMER_BLOCKED" };
 
 // createBooking signals a rejection (VALIDATION_ERROR, VEHICLE_UNAVAILABLE,
 // QUOTE_EXPIRED, ...) by RETURNING { ok: false }, not by throwing — so
@@ -144,7 +150,7 @@ export type SubmitBookingOutcome = CreateBookingOutcome | { ok: false; reason: "
 // sentinel forces that: thrown inside the transaction so Postgres rolls
 // back, caught just outside and unwrapped back into the original outcome.
 class BookingRejected extends Error {
-  constructor(public readonly outcome: Extract<CreateBookingOutcome, { ok: false }>) {
+  constructor(public readonly outcome: Extract<SubmitBookingOutcome, { ok: false }>) {
     super(`booking rejected: ${outcome.reason}`);
   }
 }
@@ -170,6 +176,15 @@ export async function submitBooking(input: SubmitBookingInput, now: Date = new D
         },
         tx
       );
+
+      // BLACKLIST MUST ACTUALLY BLOCK — checked here, inside this
+      // transaction, before anything else about this booking is written.
+      // Thrown (not returned) so it takes the same BookingRejected rollback
+      // path as a createBooking rejection below: the customer upsert above
+      // must not commit either.
+      if (await isCustomerBlocked(customer.id, { tx })) {
+        throw new BookingRejected({ ok: false, reason: "CUSTOMER_BLOCKED" });
+      }
 
       // Records that this guest's identity resolved to this quote/hold.
       await attachCustomerToQuote(input.quoteId, customer.id, tx);

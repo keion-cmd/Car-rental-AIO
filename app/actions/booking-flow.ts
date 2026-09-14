@@ -138,5 +138,14 @@ export async function submitBookingAction(input: SubmitBookingActionInput): Prom
     redirect(`/booking/confirmation/${outcome.reference}`);
   }
 
+  // CUSTOMER_BLOCKED is deliberately not passed through: telling someone
+  // they are blacklisted invites them to retry under a different email.
+  // Remapped to the same generic reason the client's fallback message
+  // ("Something went wrong. Please try again.") already covers for any
+  // unrecognised reason — see REASON_MESSAGES in BookingWizard.tsx.
+  if (outcome.reason === "CUSTOMER_BLOCKED") {
+    return { ok: false, reason: "SUBMISSION_FAILED" };
+  }
+
   return { ok: false, reason: outcome.reason };
 }
